@@ -1,0 +1,234 @@
+{
+  "skill_name": "ichra-platform-integration",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Build a quoting function for ICHRA. It takes a zip code, FIP code, state, household members (each with age, tobacco/smoker status, and relationship), and a monthly HRA contribution amount. Call the HealthSherpa API and return plans grouped by enrollment path (api vs deeplink vs not enrollable). Display deductible and max out-of-pocket for each plan.",
+      "expected_output": "A function that POSTs to the correct base URL + /api/v1/quotes with the correct structure, groups results by enrollment flags, displays cost sharing correctly, and includes HRA context.",
+      "assertions": [
+        "Uses the correct base URL (https://api.ichra.healthsherpa.com or https://api.ichra-staging.healthsherpa.com)",
+        "Uses POST method to /api/v1/quotes, not GET",
+        "Sends x-api-key header and Content-Type: application/json",
+        "Uses fip_code (not fips_code) in the quoting request",
+        "Uses applicants array (not household) with age (integer), smoker (boolean), and relationship fields",
+        "Includes off_ex: true in the quoting request body — the API only supports off-exchange enrollment and without this flag returns on-exchange plans which are not supported",
+        "Includes hra object with offered_hra: true, type: 'ichra', amount, contribution_covers, and start",
+        "Reads plans from response.plans array (response is {plans: [...], meta: {...}})",
+        "Groups or filters plans using both api_enrollment AND deeplink_enrollment flags — not just one",
+        "Handles the case where both flags are false (not enrollable)",
+        "Does not hardcode plan IDs or carrier names",
+        "Uses cost_sharing.medical_ded_ind for deductible display — NOT deductible_individual or ded_individual",
+        "Uses cost_sharing.medical_moop_ind for max OOP display — NOT moop_individual or max_out_of_pocket"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Write the code to create a complete enrollment application for a 30-year-old female named Jane Smith in Phoenix, AZ (85001, FIPS 04013). She has a $500/month ICHRA from employer 'Acme Corp' (FEIN 123456789). Plan HIOS is 53901AZ1490005, plan year 2026. The SEP reason is offered_ichra with event date 2026-03-01. Her agent is Bob Williams (NPN 98765432). Follow the full enrollment workflow from the skill, including fetching carrier-specific attestation content before building the payload. Include everything needed so this application can be immediately submitted.",
+      "expected_output": "A POST to the correct base URL + /api/v1/applications with a complete payload that would pass validation for any carrier.",
+      "assertions": [
+        "Uses the correct base URL (https://api.ichra.healthsherpa.com or https://api.ichra-staging.healthsherpa.com)",
+        "POSTs to /api/v1/applications with x-api-key header and Content-Type: application/json",
+        "Includes applicants.primary.signature with the applicant's typed name — NOT under the signatures object",
+        "Includes signatures.signature_date as a separate field — NOT under applicants",
+        "Includes ssn (or itin) on the primary applicant",
+        "Includes us_citizen, resides_in_state, and uses_tobacco booleans on primary",
+        "Includes race_ethnicity and hispanic_origin on primary (can be 'decline_to_answer')",
+        "Includes language_spoken and language_written on primary",
+        "Uses street_address_1 for address fields, not street_line_1 or address_line_1",
+        "Uses gender (not sex) and uses_tobacco (not tobacco_use)",
+        "Employer address is nested under hra.employer.address using the standard address schema (street_address_1, city, state, zip_code)",
+        "Includes hra object with offered_hra, type, amount, contribution_covers, and start fields",
+        "Includes hra.employer with name, fein, and address — all three are needed for employer group association",
+        "Includes agent_of_record with at minimum first_name, last_name, and national_producer_number",
+        "Includes attestations with electronic_signature_consent: true and agrees_issuer_attestations: true",
+        "Includes special_enrollment_period with event_type and event_date",
+        "Does NOT set desired_effective_date (should omit it or explain why it's risky)",
+        "Fetches enrollment_requirements via GET /plans/:hios_id?include=enrollment_requirements BEFORE presenting attestations",
+        "Uses the carrier-specific attestation text from enrollment_requirements as the actual consent labels — does NOT use generic labels like 'I agree to issuer attestations'",
+        "Only renders attestation fields that are present in the enrollment_requirements response"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "After creating an application, the response includes an errors array with a 'supporting_documentation_required' entry. Write the code to upload a PDF file as SEP documentation and then submit the application. Use the application_id from the create response.",
+      "expected_output": "Code that uploads a document with the correct document_type, then submits the application.",
+      "assertions": [
+        "POSTs to /api/v1/applications/:id/supporting_documentation",
+        "Includes document_type: 'sep' as a top-level field alongside the file — not nested inside the file object",
+        "For JSON upload: structures the file as {filename, content_type, content_base64} — not raw binary",
+        "For multipart upload: sends file as binary with document_type as a separate form field",
+        "Uploads the document BEFORE calling submit, not after",
+        "Submits via POST to /api/v1/applications/:id/submit after upload succeeds",
+        "Expects 202 Accepted from submit (not 200)"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "After submitting an application, I need to handle payment. Write code that reads the payment_instructions from the application response, determines the correct payment flow, and if payment redirect is supported, calls the payment redirect endpoint and builds an HTML form to send the user to the carrier's payment page.",
+      "expected_output": "Code that implements the payment decision tree and builds a form POST from the payment redirect response.",
+      "assertions": [
+        "Reads payment_instructions from the application response — does not hardcode payment behavior",
+        "Checks payment_required_with_submission first (pay before submit)",
+        "Checks payment_redirect_supported second (pay after submit)",
+        "Checks pay_by_phone_supported as fallback (show phone number)",
+        "Calls GET /api/v1/applications/:id/payment_redirect — uses GET, not POST",
+        "Builds an HTML form with method and action from the response endpoint",
+        "Includes all fields from the response fields array as hidden inputs",
+        "Auto-submits the form or provides a mechanism to redirect the user's browser",
+        "Does NOT try to parse or interpret the field names/values — passes them through exactly"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "I need to update an existing application to add a spouse dependent and change the primary's email. The application ID is HSA000738818 and the primary applicant's member_id is 12345. The application already has the primary applicant and all required fields populated.",
+      "expected_output": "A PUT request with the full application payload including the existing primary matched by member_id and a new dependent without member_id.",
+      "assertions": [
+        "Uses PUT method to /api/v1/applications/HSA000738818, not PATCH",
+        "Sends the FULL application payload, not just changed fields",
+        "Includes member_id: '12345' on the primary applicant object for matching",
+        "New spouse dependent OMITS the member_id field so HealthSherpa creates it",
+        "Dependent has relationship: 'spouse' set",
+        "Uses gender for the dependent, not sex",
+        "Includes signatures.signature_date and applicants.primary.signature in the full payload"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Build a webhook handler for HealthSherpa policy status updates. It should process all status transitions, verify authenticity, and be safe to receive duplicate deliveries.",
+      "expected_output": "A webhook endpoint that verifies the signature, responds quickly, processes async, and handles each status with appropriate business logic.",
+      "assertions": [
+        "Verifies X-Webhook-Signature header before processing the payload",
+        "Returns a 2xx response immediately, before performing business logic",
+        "Processes the event asynchronously (queue, background job, or similar)",
+        "Deduplicates using application_id + policy_status + timestamp",
+        "Handles effectuated status to trigger HRA reimbursement start or coverage activation",
+        "Handles cancelled status to stop future reimbursements",
+        "Handles terminated status to reconcile retroactive changes, may require clawback",
+        "Handles pending_effectuation status to record submission, does not treat as active coverage",
+        "Handles submission_failed status to alert or retry",
+        "Does not assume events arrive in order"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "After quoting plans, some have api_enrollment: true and others only have deeplink_enrollment: true. Write a function that routes enrollment to the correct path. For API-enrollable plans, create an application via EnrollConnect. For deeplink-only plans, redirect the user through the HealthSherpa deeplink. Handle plans that are not enrollable. Also build the UI for selecting and enrolling in a plan.",
+      "expected_output": "Code that checks both enrollment flags on the plan and routes accordingly, with proper 302 handling for deeplinks. UI shows a single 'Enroll' button, not backend flag labels.",
+      "assertions": [
+        "Checks api_enrollment and deeplink_enrollment flags to determine routing",
+        "Routes api_enrollment: true plans to POST /api/v1/applications on the ICHRA proxy base URL",
+        "Routes deeplink-only plans to POST /public/ichra/off_ex on the HealthSherpa base URL (different host)",
+        "Handles 302 redirect for deeplinks — captures Location header, does NOT follow server-side",
+        "Uses redirect: 'manual' (or equivalent) on the deeplink fetch call",
+        "Includes _agent_id in the deeplink payload (it is required for deeplinks)",
+        "Throws an error or returns a clear message when both flags are false",
+        "Does not attempt EnrollConnect for a plan with api_enrollment: false",
+        "Does NOT expose 'API Enrollment' or 'Deeplink Enrollment' labels to end users — these are internal routing flags",
+        "Shows a single 'Enroll' or 'Select Plan' button — the routing decision happens in the backend, not the UI",
+        "Enrollment form/page requires a plan_hios_id — does not allow plan-less enrollment"
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "Write a polling function that monitors an application after submission until it reaches a final status. It should use appropriate intervals and handle the case where the application stays in pending_effectuation for an extended period.",
+      "expected_output": "A polling function with escalating intervals that tracks status transitions and alerts on stale applications.",
+      "assertions": [
+        "Calls GET /api/v1/applications/:id to check status",
+        "Sends x-api-key header on every request",
+        "Polls more frequently right after submission (every ~5 minutes for the first hour)",
+        "Reduces frequency for awaiting effectuation (~30 minutes)",
+        "Drops to steady-state interval (~4 hours) or switches to webhook-driven",
+        "Treats pending_effectuation as an expected intermediate state, not an error",
+        "Handles submission_failed status as an error requiring attention (alert or retry)",
+        "Flags or alerts if pending_effectuation persists beyond 48 hours",
+        "Terminates polling on final states: effectuated, cancelled, terminated",
+        "Reads policy_status from the response, not a separate field"
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "A user provides only a zip code. Before quoting, I need to resolve it to a FIPS code because some zip codes span multiple counties. Write a county selector that calls the CMS Marketplace API to look up counties, and if there are multiple, prompts the user to select one before proceeding to quote.",
+      "expected_output": "Code that calls the CMS county lookup API, handles single vs multiple counties, and passes the selected FIPS code to the quoting function.",
+      "assertions": [
+        "Calls GET https://marketplace-int.api.healthcare.gov/api/v1/counties/by/zip/{zipcode} (the public CMS API, not a HealthSherpa endpoint)",
+        "Does NOT require an API key for the CMS call",
+        "Handles the single-county case by auto-selecting",
+        "Handles the multi-county case by presenting options to the user",
+        "Extracts the fips field from the selected county object",
+        "Passes the fips value as fip_code in the quoting request (note the field name difference)",
+        "Handles the zero-county case (invalid or unsupported zip) with a clear error"
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "Build a complete ICHRA enrollment dashboard page that shows all applications for my platform. It should support filtering by status, searching by employee name, pagination, and show key details for each application. Include a way to detect applications that need attention (stuck in pending, failed submissions, docs needed).",
+      "expected_output": "A dashboard component that calls GET /applications with appropriate filters, paginates, and highlights applications needing attention.",
+      "assertions": [
+        "Calls GET /api/v1/applications with query parameters for filtering",
+        "Uses policy_status filter parameter for status filtering",
+        "Uses limit and offset parameters for pagination",
+        "Uses updated_since parameter for incremental sync",
+        "Uses application_id from each list item to link to the detail view",
+        "Uses primary_applicant.first_name/last_name for display — NOT applicants.primary (list uses different structure than detail)",
+        "Highlights applications with submission_failed status",
+        "Highlights applications with sep_docs_required status",
+        "Highlights applications stuck in pending_effectuation for more than 48 hours",
+        "Reads pagination.total_count (not pagination.total) from the list response"
+      ]
+    }
+    ,
+    {
+      "id": 11,
+      "prompt": "Write an API client wrapper for the HealthSherpa EnrollConnect API that handles response normalization. The create/get response nests data under an 'application' key while metadata is at the top level. The plan lookup nests under a 'plan' key. Handle both correctly.",
+      "expected_output": "An API client with proper response normalization that flattens nested responses.",
+      "assertions": [
+        "Flattens the create/get response by merging response.application into the top level alongside application_id, errors, next_actions, payment_instructions",
+        "Does NOT assume application_id is inside response.application — it's only at the top level",
+        "Unwraps plan lookup responses from response.plan",
+        "Reads list items using primary_applicant.first_name/last_name — NOT applicants.primary",
+        "Uses application_id from list items to link to detail view",
+        "Reads pagination.total_count from list responses — NOT pagination.total"
+      ]
+    }
+    ,
+    {
+      "id": 12,
+      "prompt": "An ICHRA platform partner has a member whose email address was entered incorrectly during enrollment. The application has already been submitted and effectuated. Write the code to correct the email via the EnrollConnect API. The application ID is HSA000739499. Show the full workflow including checking eligibility, sending the update, and resubmitting.",
+      "expected_output": "Code that checks supports_changes, sends a PUT with the corrected email while preserving identity fields, and resubmits.",
+      "assertions": [
+        "GETs the application first and checks supports_changes is true before attempting changes",
+        "Sends a PUT to /api/v1/applications/:id with the full payload including all identity fields (first_name, last_name, date_of_birth) preserved from the original",
+        "Does NOT omit identity fields from the PUT — omitted fields are treated as null",
+        "Calls POST /api/v1/applications/:id/submit after the PUT to resubmit changes to the carrier",
+        "Handles the case where supports_changes is false by informing the user to contact the carrier directly",
+        "Checks can_report_change to confirm demographic changes are allowed"
+      ]
+    }
+    ,
+    {
+      "id": 13,
+      "prompt": "A carrier has knockout questions that make certain applicants ineligible. Write error handling code for the HealthSherpa EnrollConnect API that properly handles the ineligible_for_enrollment error when creating or updating an application. Show how to detect it, explain what it means, and show the correct user-facing response.",
+      "expected_output": "Error handling that recognizes ineligible_for_enrollment as a deterministic carrier rejection and presents an appropriate message.",
+      "assertions": [
+        "Parses the errors array from the API response",
+        "Identifies the ineligible_for_enrollment error code",
+        "Treats it as a deterministic (non-retryable) error — does NOT retry the same request",
+        "Presents a user-friendly message indicating the applicant is not eligible for this plan with this carrier",
+        "Suggests selecting a different plan or carrier as the resolution path"
+      ]
+    }
+    ,
+    {
+      "id": 14,
+      "prompt": "Write code that fetches a HealthSherpa EnrollConnect application and displays a human-readable change history from the events timeline. The application ID is HSA000739499. Show how to parse different event types and handle redacted fields.",
+      "expected_output": "Code that fetches the application, iterates the events array, and formats each event type into readable output.",
+      "assertions": [
+        "GETs /api/v1/applications/:id (with include_events=true or default)",
+        "Iterates the events array from the response",
+        "Handles submitted events by displaying the occurred_at timestamp and response_code",
+        "Handles changed events by displaying target (application or applicant), member_id for applicant changes, and the changes array with field/from/to",
+        "Handles policy_status_updated events by displaying old_status and new_status",
+        "Recognizes that sensitive fields in changes may be redacted (from/to shown as null or omitted)"
+      ]
+    }
+  ]
+}
