@@ -1,4 +1,4 @@
 # Every change to the public repo must be approved by a publisher.
 # Combined with branch protection "require review from Code Owners",
 # this is what makes promotion a gated action only the handful can do.
-*  @healthsherpa/ai-skills-publishers
+*  @healthsherpa/ai-skills-publisher
