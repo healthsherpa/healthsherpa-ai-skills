@@ -1,0 +1,20 @@
+# rsync filter rules controlling what is mirrored staging -> public.
+#
+# DECISION: the whole staging tree is safe to publish, so this is a DENYLIST:
+# everything is included EXCEPT the secret/credential patterns below.
+# (There is intentionally NO trailing "- *", so unlisted files are published.)
+#
+# This still acts as a safety net: if any of these ever appear in staging,
+# they are blocked from public, and the leak-check CI will fail the PR.
+
+- /.git
+- .env
+- .env.*
+- **/secrets/**
+- **/*secret*
+- **/*.pem
+- **/*.key
+- **/*credentials*
+- **/id_rsa
+- **/id_ed25519
+- /.github/workflows/internal-*

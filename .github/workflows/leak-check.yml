@@ -1,0 +1,63 @@
+name: leak-check
+
+# Required status check for the public repo. Blocks any publish PR that
+# introduces secrets or files outside the published allowlist.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  leak-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          VERSION=8.18.4
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Secret scan (gitleaks)
+        run: gitleaks detect --no-banner --redact --source .
+
+      - name: Enforce published allowlist
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fail if any tracked file falls outside the allowlist defined by
+          # the rsync filter. We re-derive the allowed set with rsync --dry-run
+          # against the checked-out tree and diff it against git's file list.
+          if [ ! -f publish-filter.txt ]; then
+            echo "publish-filter.txt missing from public repo root." >&2
+            exit 1
+          fi
+          mkdir -p /tmp/allowed
+          rsync -a --prune-empty-dirs \
+            --filter='. publish-filter.txt' \
+            --exclude='/.git' \
+            --exclude='/.github/CODEOWNERS' \
+            --exclude='/.github/workflows/' \
+            --exclude='/publish-filter.txt' \
+            ./ /tmp/allowed/
+          ( cd /tmp/allowed && find . -type f | sort ) > /tmp/allowed.txt
+          git ls-files \
+            | grep -v -E '^\.github/CODEOWNERS$' \
+            | grep -v -E '^\.github/workflows/' \
+            | grep -v -E '^publish-filter\.txt$' \
+            | sed 's#^#./#' | sort > /tmp/tracked.txt
+          if ! diff -u /tmp/allowed.txt /tmp/tracked.txt; then
+            echo "::error::Files present that are NOT in the published allowlist (see diff above)." >&2
+            exit 1
+          fi
+          echo "All tracked files are within the published allowlist."
