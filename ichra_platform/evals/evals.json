@@ -230,5 +230,22 @@
         "Recognizes that sensitive fields in changes may be redacted (from/to shown as null or omitted)"
       ]
     }
+    ,
+    {
+      "id": 15,
+      "prompt": "I'm enrolling a member with HCSC (Blue Cross and Blue Shield of Illinois) through EnrollConnect. The member selected a medical plan. HCSC offers qualified dental. Write the code that (a) handles the pediatric dental requirement when the member has no children under 19, and (b) handles the alternative where the member wants to add a stand-alone dental plan. Show how to discover the dental plan and how to build both application payloads.",
+      "expected_output": "Code that satisfies the ACA pediatric dental requirement exactly one way per application: either attestations.pediatric_dental OR a top-level dental_plan_hios_id, never both and never neither, and that discovers the dental plan via a dental quote.",
+      "assertions": [
+        "For the no-children case, sets attestations.pediatric_dental to a value from enrollment_requirements (e.g. 'not_applicable' or 'purchased_separately') — does NOT also send dental_plan_hios_id",
+        "For the add-dental case, sets a top-level dental_plan_hios_id — does NOT also send attestations.pediatric_dental",
+        "Explicitly notes that sending BOTH dental_plan_hios_id and attestations.pediatric_dental returns a 422 (Invalid dental selection)",
+        "Explicitly notes that sending NEITHER returns a 422 (Invalid dental selection)",
+        "Discovers the dental plan by listing dental plans (GET /plans with dental_only=true) or quoting with dental_search: true, not by guessing a HIOS ID",
+        "Notes the dental plan must be the same carrier as the medical plan (a dental_search quote can return other carriers' dental plans, so the selected dental plan's issuer must match the medical plan's issuer)",
+        "Fetches enrollment_requirements to get the valid pediatric_dental option values rather than hardcoding them",
+        "Does not hardcode plan or dental plan HIOS IDs",
+        "On update (PUT), notes that switching paths requires sending null for the field being cleared"
+      ]
+    }
   ]
 }

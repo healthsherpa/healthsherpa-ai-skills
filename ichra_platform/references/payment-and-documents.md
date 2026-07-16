@@ -46,7 +46,7 @@ GET /api/v1/applications/:id/payment_redirect
 |---|---|
 | 200 | Returns `{endpoint, method: "POST", fields: [{name, value}]}` |
 | 404 | Carrier doesn't support redirect |
-| 409 | Application not yet submitted |
+| 422 | Application not yet submitted |
 
 Build a hidden HTML form from the response and auto-submit it to redirect the user to the carrier's payment page. Validate that `endpoint` begins with `https://` and HTML-escape every interpolated value (`endpoint`, each `field.name`, each `field.value`) before insertion. Carrier-supplied field values may legitimately contain characters that break unescaped HTML, and defense-in-depth requires escaping even though the response originates from HealthSherpa.
 

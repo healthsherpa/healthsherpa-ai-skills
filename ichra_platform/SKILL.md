@@ -81,6 +81,7 @@ The integrator is responsible for the security of their own systems, API credent
 - ALWAYS use `gender` (not `sex`) and `uses_tobacco` (not `tobacco_use`).
 - ALWAYS use `state_supplement_*` for state signature fields (not `addendum_*`).
 - In the request, `pediatric_dental` (string enum: `"purchased_separately"` / `"not_applicable"`) goes under `attestations`. In the response, it's a top-level field. `pediatric_dental_signature` goes under `signatures`.
+- For carriers that offer qualified dental (currently HCSC — Blue Cross and Blue Shield of IL, MT, NM, OK, and TX), the ACA pediatric dental requirement must be satisfied **exactly one way** per application: send `attestations.pediatric_dental` OR a top-level `dental_plan_hios_id`, never both and never neither. Sending both, or neither, returns a 422 (`Invalid dental selection`). See "Qualified Dental (HCSC)".
 - ALWAYS include `hra` with employer `name`, `fein`, and `address` on every ICHRA enrollment. Without this, the enrollment cannot be associated with the employer group and downstream workflows (reimbursement, reporting, group management) will not function.
 - NEVER require `external_id`. It is optional everywhere.
 - NEVER assume real-time payment confirmation. Most carriers report asynchronously via feeds.
@@ -120,9 +121,10 @@ Your platform → HealthSherpa ICHRA API → Carrier
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/v1/quotes` | Quote plans with premiums and enrollment flags |
+| GET | `/api/v1/plans?state=AZ&plan_year=2026` | List plans + benefit metadata for a state/year (no premiums) — cache for quoting UIs |
 | GET | `/api/v1/plans/:hios_id?plan_year=2026` | Plan details, enrollment flags, and optional attestation content |
 
-Add `?include=enrollment_requirements` to plan lookup to get carrier-specific attestation text.
+Add `?include=enrollment_requirements` to plan lookup to get carrier-specific attestation text. Use `GET /api/v1/plans` to pull benefit data in bulk and cache it locally; it excludes premiums, enrollment flags, and attestation content (fetch those via `POST /quotes` or `GET /plans/:hios_id`).
 
 ### EnrollConnect (API Enrollment)
 
@@ -302,6 +304,26 @@ Signatures are split across two locations in the payload:
 - `applicants.primary.signature` — the primary applicant's typed signature. Required for submission.
 
 These are NOT under the same object. Missing either causes a 422 on submit.
+
+## Qualified Dental (HCSC)
+
+Some carriers offer qualified dental and require the ACA pediatric dental essential health benefit to be satisfied on every application. Currently this applies to **HCSC** — the Blue Cross and Blue Shield plans in IL, MT, NM, OK, and TX. You do not hardcode this list; the requirement surfaces on the plan's `enrollment_requirements` (a `pediatric_dental` attestation key is present) and is enforced on create/update.
+
+**Satisfy it exactly one way per application — never both, never neither:**
+
+1. **Attestation** — set `attestations.pediatric_dental` to one of the values from `enrollment_requirements.attestations.pediatric_dental.options` (currently `"purchased_separately"` or `"not_applicable"`). Use this when there are no children under 19 on the application, or the member already has stand-alone pediatric dental coverage.
+2. **Stand-alone dental plan** — set the top-level `dental_plan_hios_id` to a qualified stand-alone dental plan's HIOS ID (and omit `attestations.pediatric_dental`). Use this when the member wants to buy pediatric dental coverage alongside the medical plan.
+
+Sending both `dental_plan_hios_id` and `attestations.pediatric_dental`, or sending neither, returns a `422` with `Invalid dental selection`.
+
+**Rules for `dental_plan_hios_id`:**
+
+- The dental plan must belong to the **same carrier** as the medical plan, be off-exchange eligible for the plan year, and be available in the member's service area (zip). A mismatched carrier or ineligible/out-of-area plan returns `422` (`No plan found for dental_plan_hios_id: <id>`, or `dental_plan_hios_id has a carrier mismatch to the health plan`).
+- Discover eligible dental plans most reliably with `GET /plans?state=..&plan_year=..&dental_only=true&off_ex=true` (or a `dental_search` quote), then pick a plan whose issuer matches the medical plan's issuer — HCSC's stand-alone dental is "BlueCare Dental" under the same issuer prefix as the medical plan (e.g. `36096IL0830001` for BCBS IL). A `dental_search` quote may also return another carrier's dental plans and `issuer_hios_ids` does not reliably restrict dental results, so confirm the issuer match either way. See [quoting-and-plans.md](references/quoting-and-plans.md).
+- On `PUT`, to switch from one path to the other, explicitly send `null` for the field you are clearing (e.g. set `dental_plan_hios_id: null` when moving to the attestation path).
+- Both `dental_plan_hios_id` (top-level) and `pediatric_dental` are echoed back on `GET`/create responses, so you can confirm which path was recorded.
+
+HCSC also does **not** support post-enrollment changes, cancellations, or renewals (`supports_changes` is `false`), requires SEP documentation for every SEP reason including `ichra` (10 MB limit), and does not require SSN. See the HCSC entry in [carrier-examples.md](references/carrier-examples.md) for a full worked payload of both dental paths.
 
 ## Document Upload
 

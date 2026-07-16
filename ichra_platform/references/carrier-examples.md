@@ -1168,6 +1168,109 @@ All carriers below are `api_enrollment: true`. Every payload includes the attest
 
 > After create, run **step 2 (upload SEP documentation)** above, then **step 3 (submit)**.
 
+### HCSC (Blue Cross and Blue Shield — IL / MT / NM / OK / TX)
+
+HCSC is the carrier behind Blue Cross and Blue Shield of Illinois, Montana, New Mexico, Oklahoma, and Texas. It is the one carrier here that **offers qualified dental**, so every application must satisfy the ACA pediatric dental requirement exactly one way (see below).
+
+- **Plan (example):** `36096IL0810080` — Blue Cross and Blue Shield of Illinois (issuer `36096`) · IL · ZIP `60601` · FIPS `17031` · plan year 2026 (illustrative — quote for current inventory)
+- **Required attestations:** `electronic_signature_consent`, `agrees_issuer_attestations`, `broker_signature_attestation`
+- **Pediatric dental:** **Required, exactly one of** `attestations.pediatric_dental` **or** top-level `dental_plan_hios_id` — never both, never neither (else `422 Invalid dental selection`).
+- **SSN:** Not required — omit unless you collect it. (FEIN is also not collected by HCSC; including it is harmless.)
+- **SEP documentation:** **Required for every SEP reason, including `offered_ichra`** — upload before submit (10 MB limit).
+- **Notes:** No post-enrollment changes, cancellations, or renewals (`supports_changes: false`). `phone_type` is required. Create promotes to `sep_docs_required`; upload a doc, then submit.
+
+**Branch A — pediatric dental attestation** (no children under 19, or member already has stand-alone dental):
+
+```json
+{
+  "external_id": "your-tracking-id-001",
+  "plan_hios_id": "36096IL0810080",
+  "plan_year": 2026,
+  "residential_address": {
+    "street_address_1": "123 Main St",
+    "city": "Chicago",
+    "state": "IL",
+    "zip_code": "60601",
+    "fips_code": "17031"
+  },
+  "applicants": {
+    "primary": {
+      "external_id": "member-001",
+      "first_name": "Jane",
+      "last_name": "Doe",
+      "date_of_birth": "1990-05-15",
+      "gender": "female",
+      "email": "jane.doe@example.com",
+      "phone": "5555550100",
+      "phone_type": "cell",
+      "us_citizen": true,
+      "resides_in_state": true,
+      "uses_tobacco": false,
+      "race_ethnicity": "decline_to_answer",
+      "hispanic_origin": "decline_to_answer",
+      "language_spoken": "english",
+      "language_written": "english",
+      "signature": "Jane Doe"
+    }
+  },
+  "agent_of_record": {
+    "first_name": "Pat",
+    "last_name": "Broker",
+    "national_producer_number": "98765432",
+    "email": "agent@example.com",
+    "phone": "5555550101"
+  },
+  "hra": {
+    "offered_hra": true,
+    "type": "ichra",
+    "amount": 500,
+    "contribution_covers": "premium",
+    "start": "2026-01-01",
+    "employer": {
+      "name": "Acme Corp",
+      "phone": "5555550102",
+      "address": {
+        "street_address_1": "789 Corporate Blvd",
+        "city": "Chicago",
+        "state": "IL",
+        "zip_code": "60601"
+      }
+    }
+  },
+  "special_enrollment_period": {
+    "event_type": "offered_ichra",
+    "event_date": "2026-06-01"
+  },
+  "attestations": {
+    "electronic_signature_consent": true,
+    "agrees_issuer_attestations": true,
+    "broker_signature_attestation": true,
+    "agent_advised_consumer_of_product_features": true,
+    "pediatric_dental": "not_applicable"
+  },
+  "signatures": {
+    "signature_date": "2026-06-15"
+  }
+}
+```
+
+**Branch B — stand-alone dental plan.** Identical to Branch A, except you **remove** `attestations.pediatric_dental` and add a top-level `dental_plan_hios_id`. The dental plan **must be the same carrier as the medical plan** (BlueCare Dental for HCSC — same issuer prefix, e.g. `36096` in IL) and in the member's service area. Discover eligible dental plans with `GET /plans?state=IL&plan_year=2026&dental_only=true&off_ex=true` and pick one whose issuer matches the medical plan's issuer (see [quoting-and-plans.md](quoting-and-plans.md)). Passing a different-carrier dental plan returns `422 No plan found for dental_plan_hios_id: <id>`. The example below uses the verified BCBS IL dental plan `36096IL0830001` ("BlueCare Dental"); quote/list for current inventory rather than hardcoding.
+
+```json
+{
+  "plan_hios_id": "36096IL0810080",
+  "dental_plan_hios_id": "36096IL0830001",
+  "attestations": {
+    "electronic_signature_consent": true,
+    "agrees_issuer_attestations": true,
+    "broker_signature_attestation": true,
+    "agent_advised_consumer_of_product_features": true
+  }
+}
+```
+
+> After create, run **step 2 (upload SEP documentation)** above, then **step 3 (submit)**.
+
 ---
 
 ## Multi-member households
@@ -1254,6 +1357,8 @@ Example (`signatures` block for a NJ enrollment):
 | `applicants[n].has_disability` / `full_time_student` / `signature` | Required dependent fields omitted | Send `has_disability` and `full_time_student` on every dependent, and a `signature` on adult dependents |
 | `ssn` (`invalid_field_value` on submit) | Carrier requires the primary's SSN | Include a valid `ssn` for carriers marked **SSN: Required** |
 | `supporting_documentation_required` | Carrier requires SEP proof (e.g., BCBS AZ) | Upload via `/supporting_documentation` then submit |
+| `Invalid dental selection` | Qualified-dental carrier (HCSC) got both `dental_plan_hios_id` and `attestations.pediatric_dental`, or neither | Send exactly one. On update, `null` the field you are clearing |
+| `No plan found for dental_plan_hios_id: <id>` / `dental_plan_hios_id has a carrier mismatch` | Dental plan is a different carrier than the medical plan, or not eligible/in service area | Discover dental via `GET /plans?...&dental_only=true` (or `dental_search`) and pick a plan whose **issuer matches the medical plan's issuer** — HCSC's "BlueCare Dental" shares the medical issuer prefix (e.g. `36096`). Another carrier's dental plan is rejected |
 | `not eligible for API enrollment` | Plan's `api_enrollment` is false for that carrier/state | Re-quote; route to Deeplink when `api_enrollment:false` |
 | SEP date outside window | `event_date` too old/new for the SEP reason | Use a date within the carrier's window (typically 60 days before/after) |
 

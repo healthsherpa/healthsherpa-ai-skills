@@ -55,7 +55,7 @@ ALWAYS use POST (not GET). ALWAYS include the `hra` object for ICHRA quoting.
 | Parameter | Type | Description |
 |---|---|---|
 | `dental_search` | boolean | Set `true` to query standalone dental plans instead of medical. Used for dental plan discovery (e.g., HCSC). |
-| `issuer_hios_ids` | array of strings | Filter results to specific carriers by issuer HIOS ID prefix (e.g., `["12515"]` for HCSC). |
+| `issuer_hios_ids` | array of strings | Filter results to specific carriers by issuer HIOS ID prefix (e.g., `["36096"]` for Blue Cross and Blue Shield of Illinois / HCSC). Note: does not reliably filter `dental_search` results. |
 | `filter` | string | Comma-separated list of field names to include in the response (e.g., `"name,premium,hios_id,metal_level"`). Reduces payload size. |
 
 ### Response Fields (Per Plan)
@@ -122,6 +122,73 @@ both false                    → not enrollable through HealthSherpa
 ```
 
 NEVER attempt EnrollConnect for a plan with `api_enrollment: false`. The API will reject the request with a 422. A plan may have `deeplink_enrollment: true` but `api_enrollment: false` — always check both flags per plan.
+
+## Dental Plan Quoting (HCSC / qualified-dental carriers)
+
+Some carriers (currently **HCSC** — the Blue Cross and Blue Shield plans in IL, MT, NM, OK, and TX) offer qualified dental and require the ACA pediatric dental essential health benefit on every enrollment. When the member wants to buy a stand-alone dental plan alongside the medical plan, you quote for dental separately and pass the selected dental plan into the enrollment as `dental_plan_hios_id`.
+
+**Discover dental plans** the most reliably with the plan-list endpoint filtered to `dental_only=true`, then pick a plan whose **issuer matches the medical plan's issuer** (HCSC's stand-alone dental is "BlueCare Dental", same issuer prefix as the medical plan, e.g. `36096` in IL / `33602` in TX):
+
+```
+GET /api/v1/plans?state=IL&plan_year=2026&dental_only=true&off_ex=true
+```
+
+Example result (illustrative): `36096IL0830001` "BlueCare Dental" and `36096IL0830003` "BlueCare Dental 4 Kids" — both issuer `36096` (Blue Cross and Blue Shield of Illinois), the same issuer as the medical plan `36096IL0810080`.
+
+You can also quote for dental with a `POST /quotes` call that sets `dental_search: true`, but note a `dental_search` quote may return dental plans from **other carriers** and `issuer_hios_ids` does not reliably restrict dental results — so whichever discovery path you use, confirm the chosen dental plan's **issuer matches the medical plan's issuer** before enrollment. Passing a different-carrier dental plan returns `422 No plan found for dental_plan_hios_id: <id>` at create.
+
+**End-to-end flow for a qualified-dental carrier:**
+
+1. `POST /quotes` for the **medical** plan (as usual) — member selects a medical plan with `api_enrollment: true`.
+2. Satisfy pediatric dental exactly one way:
+   - **Attestation path** — no second quote needed. Send `attestations.pediatric_dental` (`purchased_separately` or `not_applicable`) on the application.
+   - **Dental plan path** — discover dental plans via `GET /plans?...&dental_only=true` (or a `dental_search` quote), member selects a dental plan **whose issuer matches the medical plan's issuer**, send its `hios_id` as `dental_plan_hios_id` on the application (and omit `attestations.pediatric_dental`).
+3. `POST /api/v1/applications` with exactly one of the two. Both, or neither, returns a `422` (`Invalid dental selection`).
+
+The dental plan must be the **same carrier** as the medical plan, off-exchange eligible for the plan year, and in the member's service area, or the create returns a `422`. See "Qualified Dental (HCSC)" in SKILL.md and the HCSC entry in [carrier-examples.md](carrier-examples.md) for full payloads.
+
+## GET /plans (list)
+
+Pull plan and benefit metadata in bulk for a state and plan year, without quoting. Use this to cache plan data locally (benefits, cost-sharing, networks, metal level) so quoting and plan-comparison front-ends can render instantly from your own store instead of round-tripping for every interaction.
+
+```
+GET /api/v1/plans?state=AZ&plan_year=2026
+```
+
+Required: `state`, `plan_year`. Optional: `off_ex` (off-exchange plans), `dental_only`, `filter` (comma-separated field allowlist; `hios_id`, `name`, and `year` are always included), `page`, `per_page` (default 20, max 500 — values above the cap are silently capped).
+
+Response is a lighter per-plan payload plus `meta.result_count` (total across all pages):
+
+```json
+{
+  "plans": [
+    {
+      "hios_id": "53901AZ1490005",
+      "name": "Blue Portfolio HSA Gold Statewide PPO",
+      "year": 2026,
+      "state": "AZ",
+      "metal_level": "Gold",
+      "plan_type": "PPO",
+      "ichra_only": false,
+      "dental_only": false,
+      "hsa_eligible": true,
+      "issuer_name": "Blue Cross Blue Shield",
+      "issuer": { },
+      "benefits": { },
+      "cost_sharing": { },
+      "cost_sharing_tiers": [ ],
+      "urls": { }
+    }
+  ],
+  "meta": { "result_count": 214 }
+}
+```
+
+**What this endpoint does NOT return** (by design): premiums, `api_enrollment`/`deeplink_enrollment` flags, and `enrollment_requirements`. These are member/household- or selection-specific — fetch them in real time:
+- Premiums and enrollment flags → `POST /quotes` (priced, per household).
+- Enrollment flags + attestation content for a single selected plan → `GET /plans/:hios_id`.
+
+Recommended pattern: cache the `/plans` payload per `state`/`plan_year` (benefit data is stable within a plan year), then layer live `POST /quotes` pricing on top for the actual quote.
 
 ## GET /plans/:hios_id
 
@@ -202,10 +269,10 @@ If one county is returned, auto-select it. If multiple, prompt the user to choos
 
 ## Large Group Quoting
 
-No bulk endpoint. One `POST /quotes` per household.
+There is no bulk **quoting** (pricing) endpoint — premiums are household-specific, so run one `POST /quotes` per household. For bulk **plan/benefit metadata**, use `GET /api/v1/plans` (see above) and cache it locally.
 
 For a 500-person group at Standard rate limits (3,000 quotes/min, burst 300): approximately 10 seconds with 50 concurrent requests.
 
-- Cache results per household composition — premiums don't change within a plan year for the same inputs.
+- Cache `GET /api/v1/plans` results per `state`/`plan_year` for benefit data; cache `POST /quotes` results per household composition — premiums don't change within a plan year for the same inputs.
 - Implement exponential backoff on 429 responses.
 - Use `retry_after` header value from 429 responses.
