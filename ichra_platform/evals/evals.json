@@ -3,8 +3,8 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Build a quoting function for ICHRA. It takes a zip code, FIP code, state, household members (each with age, tobacco/smoker status, and relationship), and a monthly HRA contribution amount. Call the HealthSherpa API and return plans grouped by enrollment path (api vs deeplink vs not enrollable). Display deductible and max out-of-pocket for each plan.",
-      "expected_output": "A function that POSTs to the correct base URL + /api/v1/quotes with the correct structure, groups results by enrollment flags, displays cost sharing correctly, and includes HRA context.",
+      "prompt": "Build a quoting function for ICHRA. It takes a zip code, FIP code, state, household members (each with age, tobacco/smoker status, and relationship), and a monthly HRA contribution amount. Call the HealthSherpa API and return plans grouped by enrollment path (api vs deeplink vs not enrollable). Show the employee's net monthly cost after the HRA contribution. Display deductible and max out-of-pocket for each plan.",
+      "expected_output": "A function that POSTs to the correct base URL + /api/v1/quotes with the correct structure, groups results by enrollment flags, displays cost sharing correctly, and applies the HRA contribution client-side to show net cost.",
       "assertions": [
         "Uses the correct base URL (https://api.ichra.healthsherpa.com or https://api.ichra-staging.healthsherpa.com)",
         "Uses POST method to /api/v1/quotes, not GET",
@@ -12,7 +12,7 @@
         "Uses fip_code (not fips_code) in the quoting request",
         "Uses applicants array (not household) with age (integer), smoker (boolean), and relationship fields",
         "Includes off_ex: true in the quoting request body — the API only supports off-exchange enrollment and without this flag returns on-exchange plans which are not supported",
-        "Includes hra object with offered_hra: true, type: 'ichra', amount, contribution_covers, and start",
+        "Applies the monthly HRA contribution client-side to compute the employee's net cost (e.g. max(0, plan.premium - hra_amount))",
         "Reads plans from response.plans array (response is {plans: [...], meta: {...}})",
         "Groups or filters plans using both api_enrollment AND deeplink_enrollment flags — not just one",
         "Handles the case where both flags are false (not enrollable)",
@@ -68,8 +68,7 @@
       "expected_output": "Code that implements the payment decision tree and builds a form POST from the payment redirect response.",
       "assertions": [
         "Reads payment_instructions from the application response — does not hardcode payment behavior",
-        "Checks payment_required_with_submission first (pay before submit)",
-        "Checks payment_redirect_supported second (pay after submit)",
+        "Checks payment_redirect_supported (pay after submit)",
         "Checks pay_by_phone_supported as fallback (show phone number)",
         "Calls GET /api/v1/applications/:id/payment_redirect — uses GET, not POST",
         "Builds an HTML form with method and action from the response endpoint",
@@ -95,17 +94,16 @@
     {
       "id": 6,
       "prompt": "Build a webhook handler for HealthSherpa policy status updates. It should process all status transitions, verify authenticity, and be safe to receive duplicate deliveries.",
-      "expected_output": "A webhook endpoint that verifies the signature, responds quickly, processes async, and handles each status with appropriate business logic.",
+      "expected_output": "A webhook endpoint that authenticates the request using the configured method, responds quickly, processes async, and handles each status with appropriate business logic.",
       "assertions": [
-        "Verifies X-Webhook-Signature header before processing the payload",
-        "Returns a 2xx response immediately, before performing business logic",
+        "Authenticates the request using the authentication method configured during onboarding before processing the payload",
+        "Returns a 200 response immediately, before performing business logic",
         "Processes the event asynchronously (queue, background job, or similar)",
-        "Deduplicates using application_id + policy_status + timestamp",
+        "Deduplicates using transaction_id (the unique event identifier)",
         "Handles effectuated status to trigger HRA reimbursement start or coverage activation",
         "Handles cancelled status to stop future reimbursements",
         "Handles terminated status to reconcile retroactive changes, may require clawback",
         "Handles pending_effectuation status to record submission, does not treat as active coverage",
-        "Handles submission_failed status to alert or retry",
         "Does not assume events arrive in order"
       ]
     },
@@ -228,6 +226,23 @@
         "Handles changed events by displaying target (application or applicant), member_id for applicant changes, and the changes array with field/from/to",
         "Handles policy_status_updated events by displaying old_status and new_status",
         "Recognizes that sensitive fields in changes may be redacted (from/to shown as null or omitted)"
+      ]
+    }
+    ,
+    {
+      "id": 15,
+      "prompt": "I'm enrolling a member with HCSC (Blue Cross and Blue Shield of Illinois) through EnrollConnect. The member selected a medical plan. HCSC offers qualified dental. Write the code that (a) handles the pediatric dental requirement when the member has no children under 19, and (b) handles the alternative where the member wants to add a stand-alone dental plan. Show how to discover the dental plan and how to build both application payloads.",
+      "expected_output": "Code that satisfies the ACA pediatric dental requirement exactly one way per application: either attestations.pediatric_dental OR a top-level dental_plan_hios_id, never both and never neither, and that discovers the dental plan via a ZIP/FIPS-scoped dental_search quote (or the plans list with service area validated).",
+      "assertions": [
+        "For the no-children case, sets attestations.pediatric_dental to a value from enrollment_requirements (e.g. 'not_applicable' or 'purchased_separately') — does NOT also send dental_plan_hios_id",
+        "For the add-dental case, sets a top-level dental_plan_hios_id — does NOT also send attestations.pediatric_dental",
+        "Explicitly notes that sending BOTH dental_plan_hios_id and attestations.pediatric_dental returns a 422 (Invalid dental selection)",
+        "Explicitly notes that sending NEITHER returns a 422 (Invalid dental selection)",
+        "Discovers the dental plan with a ZIP/FIPS-scoped dental_search quote (preferred, since it is service-area accurate) or the GET /plans dental_only=true list, not by guessing a HIOS ID; if using the list, validates the plan is available in the member's service area (e.g. via a dental quote) before enrolling",
+        "Notes the dental plan must be the same carrier as the medical plan (a dental_search quote can return other carriers' dental plans, so the selected dental plan's issuer must match the medical plan's issuer)",
+        "Fetches enrollment_requirements to get the valid pediatric_dental option values rather than hardcoding them",
+        "Does not hardcode plan or dental plan HIOS IDs",
+        "On update (PUT), notes that switching paths requires sending null for the field being cleared"
       ]
     }
   ]

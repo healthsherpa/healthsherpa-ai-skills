@@ -47,9 +47,8 @@ The integrator is responsible for the security of their own systems, API credent
 
 **Webhook endpoint**
 - Serve over HTTPS only.
-- Verify `X-Webhook-Signature` on every request using a constant-time comparison (`crypto.timingSafeEqual` in Node, `hmac.compare_digest` in Python, or equivalent).
-- Reject requests missing the signature header.
-- Process events idempotently (dedupe by `application_id` + `policy_status` + `timestamp`) to handle at-least-once delivery safely.
+- Authenticate every request using the method you configured during onboarding (HealthSherpa supports a variety of methods; requests carry headers consistent with that method). Reject requests that fail authentication before any business logic runs.
+- Process events idempotently (dedupe by `transaction_id`) to handle repeat deliveries safely.
 
 **Defensive rendering**
 - When building the payment redirect HTML form, HTML-escape `endpoint`, every `field.name`, and every `field.value` before insertion. Validate `endpoint` begins with `https://`.
@@ -69,7 +68,7 @@ The integrator is responsible for the security of their own systems, API credent
 - ALWAYS load the API key from an environment variable or secret manager. NEVER hardcode it in source code or commit it to version control.
 - ALWAYS use HTTPS. NEVER disable TLS certificate verification to work around connection errors.
 - NEVER log full request or response bodies. Applicant fields including `ssn`, `itin`, `date_of_birth`, `signature`, `email`, full `residential_address`, and `hra.employer.fein` must be redacted from logs and error reports.
-- ALWAYS verify the `X-Webhook-Signature` header using a constant-time comparison. Reject requests with a missing or invalid signature before any business logic runs.
+- ALWAYS authenticate webhook requests using the method configured during onboarding. Reject requests that fail authentication before any business logic runs.
 - ALWAYS use `application_id` (not `id`) as the application identifier in responses.
 - ALWAYS use HealthSherpa-assigned applicant `member_id` for matching on PUT. `external_id` is optional metadata.
 - ALWAYS check `api_enrollment` / `deeplink_enrollment` flags on each plan before routing to enroll.
@@ -81,13 +80,14 @@ The integrator is responsible for the security of their own systems, API credent
 - ALWAYS use `gender` (not `sex`) and `uses_tobacco` (not `tobacco_use`).
 - ALWAYS use `state_supplement_*` for state signature fields (not `addendum_*`).
 - In the request, `pediatric_dental` (string enum: `"purchased_separately"` / `"not_applicable"`) goes under `attestations`. In the response, it's a top-level field. `pediatric_dental_signature` goes under `signatures`.
+- For carriers that offer qualified dental (currently HCSC — Blue Cross and Blue Shield of IL, MT, NM, OK, and TX), the ACA pediatric dental requirement must be satisfied **exactly one way** per application: send `attestations.pediatric_dental` OR a top-level `dental_plan_hios_id`, never both and never neither. Sending both, or neither, returns a 422 (`Invalid dental selection`). See "Qualified Dental (HCSC)".
 - ALWAYS include `hra` with employer `name`, `fein`, and `address` on every ICHRA enrollment. Without this, the enrollment cannot be associated with the employer group and downstream workflows (reimbursement, reporting, group management) will not function.
 - NEVER require `external_id`. It is optional everywhere.
 - NEVER assume real-time payment confirmation. Most carriers report asynchronously via feeds.
 - ALWAYS fetch `enrollment_requirements` via `GET /plans/:hios_id?plan_year=YYYY&include=enrollment_requirements` before presenting attestation checkboxes. Use the carrier's specific text as labels. Only render attestation fields that are present in the response. Fall back to generic labels only when enrollment_requirements is unavailable.
 - ALWAYS include `agent_of_record` with at minimum `first_name`, `last_name`, and `national_producer_number` on every enrollment. Without it, the enrollment may not be attributed to the correct agent or broker.
 - ALWAYS include `off_ex: true` in quoting requests. The API only supports off-exchange enrollment. Without it, the API returns on-exchange plans which are not supported.
-- All enums are snake_case lowercase. All dates ISO 8601. Money as string (`"50.50"`).
+- All enums are snake_case lowercase. Dates in API requests and responses are ISO 8601; dates in webhook payloads are `MM/DD/YYYY` (see webhooks-and-monitoring.md). Money as string (`"50.50"`).
 
 ## API Behavior Notes
 
@@ -120,9 +120,10 @@ Your platform → HealthSherpa ICHRA API → Carrier
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/v1/quotes` | Quote plans with premiums and enrollment flags |
+| GET | `/api/v1/plans?state=AZ&plan_year=2026` | List plans + benefit metadata for a state/year (no premiums) — cache for quoting UIs |
 | GET | `/api/v1/plans/:hios_id?plan_year=2026` | Plan details, enrollment flags, and optional attestation content |
 
-Add `?include=enrollment_requirements` to plan lookup to get carrier-specific attestation text.
+Add `?include=enrollment_requirements` to plan lookup to get carrier-specific attestation text. Use `GET /api/v1/plans` to pull benefit data in bulk and cache it locally; it excludes premiums, enrollment flags, and attestation content (fetch those via `POST /quotes` or `GET /plans/:hios_id`).
 
 ### EnrollConnect (API Enrollment)
 
@@ -188,8 +189,8 @@ sep_docs_required → sep_docs_under_review → pending_effectuation
 | `sep_docs_under_review` | SEP docs uploaded, carrier is reviewing |
 | `pending_effectuation` | Submitted to carrier, awaiting confirmation |
 | `effectuated` | Carrier confirmed, coverage active |
-| `cancelled` | Prospective cancellation (some carriers do not support this) |
-| `terminated` | Retroactive or immediate termination |
+| `cancelled` | Policy never took effect (never effectuated), typically non-payment. Some carriers do not support requesting this. |
+| `terminated` | Policy was active and later ended (consumer, carrier, or plan-year expiration) |
 
 ## Minimum Viable Payload
 
@@ -243,7 +244,7 @@ There is no way to query valid effective dates ahead of time. Omit this field un
 
 **A plan must be selected before enrollment begins.** There is no valid "plan-less" enrollment. The enrollment form/page should only be reachable after plan selection and must always have `plan_hios_id` and `plan_year` populated.
 
-1. `POST /quotes` with applicants (age, smoker, relationship) and HRA data — get plans with premiums and enrollment flags
+1. `POST /quotes` with applicants (age, smoker, relationship) and `off_ex: true` — get plans with premiums and enrollment flags. Net out the ICHRA amount client-side for display.
 2. Employee selects a plan (user clicks "Enroll" or "Select" on a specific plan card)
 3. `GET /plans/:hios_id?plan_year=2026&include=enrollment_requirements` — get carrier-specific attestation text
 4. Route based on flags (internal — not shown to user):
@@ -253,9 +254,7 @@ There is no way to query valid effective dates ahead of time. Omit this field un
 5. `POST /applications` — create with complete payload (see Minimum Viable Payload above)
 6. Check `errors` array — if empty, ready to submit. If contains `supporting_documentation_required`, upload docs first.
 7. `POST /applications/:id/supporting_documentation` with `document_type: "sep"` and file payload (if needed)
-8. Read `payment_instructions` from the application response to determine payment timing:
-   - If `payment_required_with_submission` is `true` → `GET /payment_redirect`, redirect user to pay **before** submitting
-   - Otherwise → proceed to submit first (step 9)
+8. Read `payment_instructions` to determine payment timing (see the Payment Decision Tree in payment-and-documents.md). When `payment_redirect_supported` or `pay_by_phone_supported`, payment is handled after submission (step 10)
 9. `POST /applications/:id/submit` — submit to carrier (returns 202 Accepted)
 10. Handle post-submit payment:
     - If `payment_redirect_supported` is `true` → `GET /payment_redirect`, redirect user to carrier payment page
@@ -302,6 +301,26 @@ Signatures are split across two locations in the payload:
 - `applicants.primary.signature` — the primary applicant's typed signature. Required for submission.
 
 These are NOT under the same object. Missing either causes a 422 on submit.
+
+## Qualified Dental (HCSC)
+
+Some carriers offer qualified dental and require the ACA pediatric dental essential health benefit to be satisfied on every application. Currently this applies to **HCSC** — the Blue Cross and Blue Shield plans in IL, MT, NM, OK, and TX. You do not hardcode this list; the requirement surfaces on the plan's `enrollment_requirements` (a `pediatric_dental` attestation key is present) and is enforced on create/update.
+
+**Satisfy it exactly one way per application — never both, never neither:**
+
+1. **Attestation** — set `attestations.pediatric_dental` to one of the values from `enrollment_requirements.attestations.pediatric_dental.options` (currently `"purchased_separately"` or `"not_applicable"`). Use this when there are no children under 19 on the application, or the member already has stand-alone pediatric dental coverage.
+2. **Stand-alone dental plan** — set the top-level `dental_plan_hios_id` to a qualified stand-alone dental plan's HIOS ID (and omit `attestations.pediatric_dental`). Use this when the member wants to buy pediatric dental coverage alongside the medical plan.
+
+Sending both `dental_plan_hios_id` and `attestations.pediatric_dental`, or sending neither, returns a `422` with `Invalid dental selection`.
+
+**Rules for `dental_plan_hios_id`:**
+
+- The dental plan must belong to the **same carrier** as the medical plan, be off-exchange eligible for the plan year, and be available in the member's service area (zip). A mismatched carrier or ineligible/out-of-area plan returns `422` (`No plan found for dental_plan_hios_id: <id>`, or `dental_plan_hios_id has a carrier mismatch to the health plan`).
+- Discover eligible dental plans with a **ZIP/FIPS-scoped dental quote**: `POST /quotes` with `dental_search: true` and the member's `zip_code`, `fip_code`, and `state`. Because it is scoped to the member's location, it returns only plans in their service area, so it is the reliable way to pick a plan that will pass create. Then confirm the chosen plan's issuer matches the medical plan's issuer: a `dental_search` quote can also return another carrier's dental plans, and `issuer_hios_ids` does not reliably restrict dental results. HCSC's stand-alone dental is "BlueCare Dental" under the same issuer prefix as the medical plan (e.g. `36096IL0830001` for BCBS IL). The `GET /plans?state=..&plan_year=..&dental_only=true&off_ex=true` list is state-level (useful for browsing or caching a catalog) but is **not** filtered by the member's service area, so a plan taken straight from it can still fail create with a `422` when it is not available at the member's ZIP. Validate service area with the dental quote before enrolling. See [quoting-and-plans.md](references/quoting-and-plans.md).
+- On `PUT`, to switch from one path to the other, explicitly send `null` for the field you are clearing (e.g. set `dental_plan_hios_id: null` when moving to the attestation path).
+- Both `dental_plan_hios_id` (top-level) and `pediatric_dental` are echoed back on `GET`/create responses, so you can confirm which path was recorded.
+
+HCSC also does **not** support post-enrollment changes, cancellations, or renewals (`supports_changes` is `false`), requires SEP documentation for every SEP reason including `offered_ichra` (10 MB limit), and does not require SSN. See the HCSC entry in [carrier-examples.md](references/carrier-examples.md) for a full worked payload of both dental paths.
 
 ## Document Upload
 
