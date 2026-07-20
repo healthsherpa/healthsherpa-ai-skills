@@ -85,6 +85,7 @@ Note: `applicants.primary.signature` (the typed name) is on the applicant object
 |---|---|---|---|
 | `plan_hios_id` | string | Yes | 14-char HIOS plan ID (e.g., `53901AZ1490005`) |
 | `plan_year` | int | Yes | e.g., 2026 |
+| `dental_plan_hios_id` | string | Cond | HIOS ID of a qualified stand-alone dental plan. Only for carriers that offer qualified dental (currently HCSC). Exactly one of `dental_plan_hios_id` or `attestations.pediatric_dental` must be present — not both. Must be the same carrier as the medical plan and available in the member's service area. See "Qualified Dental (HCSC)" in SKILL.md. |
 | `applicants` | object | Yes | `{primary: {…}, dependents: [{…}]}` |
 | `residential_address` | address | Yes | See Address Object |
 | `external_id` | string | No | Your tracking ID. Optional everywhere. |
@@ -165,7 +166,7 @@ Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_lin
 
 | Field | Type | Notes |
 |---|---|---|
-| `relationship` | enum | Required. `spouse`, `child`, `domestic_partner`, `stepchild`, etc. |
+| `relationship` | enum | Required. Universally accepted: `spouse`, `child`, `domestic_partner`. `parent`/`stepparent` and `parent_in_law`/`other` are accepted only for specific carrier/state combinations, not across the board. |
 
 ### Applicant Matching on PUT
 
@@ -294,6 +295,8 @@ Each carrier supports a different subset. Always send the canonical value — He
 
 Most fields are booleans. `pediatric_dental` is a string enum (`"purchased_separately"` or `"not_applicable"`) — get the legal text and valid options from `GET /plans/:hios_id?plan_year=2026&include=enrollment_requirements`. Present legal text to the consumer before setting values.
 
+For carriers that offer qualified dental (currently HCSC), `attestations.pediatric_dental` is the **attestation** path for satisfying the ACA pediatric dental requirement. The alternative is buying a stand-alone dental plan via the top-level `dental_plan_hios_id`. Send exactly one of the two — both, or neither, returns a `422` (`Invalid dental selection`). See "Qualified Dental (HCSC)" in SKILL.md.
+
 ## Signatures
 
 ```json
@@ -402,8 +405,8 @@ The `GET /applications/:id` response includes an `events` array that provides a 
 | `sep_docs_under_review` | SEP docs uploaded, carrier reviewing | No |
 | `pending_effectuation` | Submitted to carrier, awaiting confirmation | No |
 | `effectuated` | Carrier confirmed, coverage active | Yes (but can be cancelled/terminated) |
-| `cancelled` | Prospective cancellation | Yes |
-| `terminated` | Retroactive or immediate termination | Yes |
+| `cancelled` | Policy never took effect (never effectuated), typically non-payment | Yes |
+| `terminated` | Policy was active and later ended | Yes |
 
 ### Response Normalization
 

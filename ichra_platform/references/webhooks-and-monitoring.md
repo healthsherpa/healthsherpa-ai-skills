@@ -10,55 +10,77 @@ Two webhook types are available:
 
 Both webhook types fire for EnrollConnect and Deeplink submissions.
 
-## Signature Verification
+## Authentication
 
-Every webhook request includes an `X-Webhook-Signature` header. Always verify this header before processing the payload to ensure the request is authentic. The signing secret is provided during onboarding alongside your webhook URL. Contact your HealthSherpa account manager for verification details specific to your integration.
+Webhook authentication is configured per integration during onboarding — HealthSherpa supports a variety of methods, and you specify the approach and credentials when you register your endpoint. Requests carry headers consistent with the method you chose, plus a `Content-Type: application/json` header. Verify every request using that configured method before processing the payload. Contact your HealthSherpa account manager for the details specific to your integration.
 
 ## Webhook Rules
 
-- Respond 2xx within 10 seconds. Process the event asynchronously.
-- Verify `X-Webhook-Signature` header on every request.
-- Deduplicate by `application_id` + `policy_status` + `timestamp`.
-- Delivery is at-least-once. Up to 3 retries: 20 seconds, 10 minutes, 1 hour.
-- Failed events can be replayed on request — contact your account manager for time-range replay.
+- Respond with `HTTP 200 OK` promptly and process the event asynchronously.
+- Authenticate every request using the method you configured during onboarding.
+- Make your handler idempotent — deduplicate by `transaction_id` (the unique event identifier); the same event may arrive more than once.
+- Contact your account manager if you need help re-delivering missed events.
 
 ## Payload
 
+Both webhook types share one schema. `event_type` is `submission` (Submission Confirmation) or `sync` (Policy Status). Dates in the payload use `MM/DD/YYYY`. `policies` is an array. Off-exchange example:
+
 ```json
 {
-  "event_type": "policy_status_changed",
-  "application_id": "HSA000000001",
-  "external_id": "your-tracking-id",
+  "transaction_id": 123456789,
+  "application_id": "HSA000000000",
   "policy_status": "effectuated",
-  "policy": {
-    "policy_id": "HSP000000001",
-    "effective_date": "2026-07-01",
-    "status": "effectuated",
-    "plan_hios_id": "53901AZ1490005",
-    "gross_premium": 750.25,
-    "members": [
-      {
-        "member_id": "HSM000000001",
-        "effective_date": "2026-07-01",
-        "removed_date": null
+  "event_type": "sync",
+  "event_timestamp": "07/01/2025",
+  "external_id": "your-tracking-id",
+  "policy_aor_npn": "1234567890",
+  "submitter_npn": "17169718",
+  "npn_used_at_submission": "17169718",
+  "issuer_hios_id": "12345",
+  "members": [
+    { "member_id": "HSM000000000", "first_name": "John", "last_name": "Doe", "date_of_birth": "05/10/1980" }
+  ],
+  "policies": [
+    {
+      "policy_id": "HSP000000000",
+      "effective_date": "08/01/2025",
+      "expiration_date": "12/31/2025",
+      "status": "effectuated",
+      "plan_hios_id": "12345LA0123456",
+      "gross_premium": 750.25,
+      "members": [
+        { "member_id": "HSM000000000", "effective_date": "08/01/2025", "removed_date": null }
+      ],
+      "payment": {
+        "payment_status": "paid",
+        "payment_status_updated_date": "06/15/2025",
+        "paid_through_date": "07/31/2025",
+        "current_member_responsibility_balance_due": "50.50",
+        "autopay_indicator": true
       }
-    ]
-  },
-  "timestamp": "2026-07-02T08:15:00Z"
+    }
+  ]
 }
 ```
 
 ## Event Actions
+
+The Policy Status webhook (`event_type: "sync"`) delivers the lifecycle `policy_status` values:
+
+| `policy_status` | Action |
+|---|---|
+| `pending_effectuation` | Record submission. Coverage pending carrier confirmation (may await binder payment or account setup, even for $0 plans). |
+| `effectuated` | Coverage active and binder payment received. Start HRA reimbursements. |
+| `cancelled` | Policy never effectuated (typically non-payment). Stop future reimbursements. |
+| `terminated` | Policy was active and later ended. Reconcile retroactive changes; may require reimbursement clawback. |
+
+The following `policy_status` values are not delivered by the Policy Status webhook — you observe them on the application record via `GET /api/v1/applications/:id` during the create / submit / document flow:
 
 | `policy_status` | Action |
 |---|---|
 | `submission_failed` | Carrier submission failed. Check `errors`. Alert for manual review or retry. |
 | `sep_docs_required` | SEP documentation needed. Prompt user to upload via `/supporting_documentation`. |
 | `sep_docs_under_review` | Docs uploaded, carrier reviewing. No action needed — wait for next transition. |
-| `pending_effectuation` | Record submission. Coverage pending carrier confirmation. |
-| `effectuated` | Coverage active. Start HRA reimbursements. |
-| `cancelled` | Stop future reimbursements. Prospective cancellation. |
-| `terminated` | Reconcile retroactive changes. May require reimbursement clawback. |
 
 ## Polling Fallback
 
