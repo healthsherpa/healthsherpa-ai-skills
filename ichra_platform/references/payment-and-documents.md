@@ -5,20 +5,22 @@
 Read `payment_instructions` from the application response and follow this logic:
 
 ```
-payment_instructions is null
-  → no plan set yet (application still in draft without a plan)
+if payment_instructions is null:
+  The application does not have a plan yet.
+  Stop payment routing until a plan has been selected.
 
-payment_required_with_submission == true
-  → carrier uses the in-flow payment flow, which is documented separately
+if payment_required_with_submission is true:
+  Require rel "payment_method" in next_actions.
+  Require method PUT and a relative href matching the current application.
+  Send the supported payment method through the HealthSherpa-provided PCI proxy.
+  Require 200 OK before calling /submit.
+  If the action is absent, stop and contact HealthSherpa.
 
-payment_redirect_supported == true
-  → submit FIRST, then GET /payment_redirect to send user to carrier payment
-
-pay_by_phone_supported == true
-  → show payment_phone_number to user
-
-none of the above
-  → carrier handles payment outside this flow
+otherwise:
+  Submit the application first.
+  If payment_redirect_supported is true, use GET /payment_redirect.
+  If pay_by_phone_supported is true, show payment_phone_number.
+  If neither is true, the carrier handles payment outside this flow.
 ```
 
 ## payment_instructions Object
@@ -26,15 +28,178 @@ none of the above
 ```json
 {
   "payment_instructions": {
-    "payment_required_with_submission": false,
-    "payment_redirect_supported": true,
+    "payment_required_with_submission": true,
+    "payment_redirect_supported": false,
     "pay_by_phone_supported": true,
-    "payment_phone_number": "8005550100"
+    "payment_phone_number": "8557481808"
   }
 }
 ```
 
 NEVER hardcode payment behavior per carrier. Always read from `payment_instructions`.
+
+## PUT /payment_method
+
+Use this endpoint when `payment_required_with_submission` is `true`. Anthem and Wellpoint currently use this in-flow ACH path. The create or GET response may include a `missing_required_field` error for `payment_method` until this call succeeds.
+
+Require the `next_actions` entry with `rel: "payment_method"`:
+
+```json
+{
+  "rel": "payment_method",
+  "href": "/api/v1/applications/HSA000000001/payment_method",
+  "method": "PUT"
+}
+```
+
+If `payment_required_with_submission` is `true` but this action is absent, stop and contact HealthSherpa. Do not construct the endpoint URL or submit the application.
+
+Validate the action before joining its `href` to the PCI proxy base URL:
+
+- `method` must equal `"PUT"`.
+- `href` must be a relative path, not an absolute URL.
+- `href` must equal `/api/v1/applications/{application_id}/payment_method` for the current application.
+- Reject unexpected methods, hosts, paths, and application ID mismatches.
+
+Send the request from your backend through the PCI-compliant proxy URL provided by HealthSherpa. The proxy tokenizes the bank account number in transit. Do not send this request from browser code, and do not log `eft_routing`, `eft_number`, or the full request body.
+
+Build the payment object at runtime from the consumer's billing and bank information. Do not save a reusable request file containing bank details or hardcode test fixtures in production code.
+
+```javascript
+const expectedPath =
+  `/api/v1/applications/${encodeURIComponent(applicationId)}/payment_method`;
+const paymentAction = nextActions.find(
+  (action) => action.rel === "payment_method"
+);
+
+if (
+  paymentAction?.method !== "PUT" ||
+  paymentAction.href !== expectedPath ||
+  !paymentAction.href.startsWith("/")
+) {
+  throw new Error("Invalid payment_method action");
+}
+
+const effectiveWithdrawDay =
+  paymentType === "both" ? (selectedWithdrawDay ?? 1) : undefined;
+
+if (
+  paymentType === "both" &&
+  (
+    !Number.isInteger(effectiveWithdrawDay) ||
+    effectiveWithdrawDay < 1 ||
+    effectiveWithdrawDay > 28
+  )
+) {
+  throw new Error("withdraw_day must be an integer from 1 through 28");
+}
+
+const paymentMethod = {
+  payment_method_type: "bank_account",
+  first_name: billingAccount.firstName,
+  last_name: billingAccount.lastName,
+  address: {
+    street_address_1: billingAccount.address.street1,
+    street_address_2: billingAccount.address.street2,
+    city: billingAccount.address.city,
+    state: billingAccount.address.state,
+    zip_code: billingAccount.address.zipCode,
+  },
+  eft_routing: bankAccount.routingNumber,
+  eft_number: bankAccount.accountNumber,
+  eft_type: bankAccount.accountType,
+  eft_level: bankAccount.accountLevel,
+  bank_name: bankAccount.bankName,
+  payment_type: paymentType,
+  ...(paymentType === "both" && { withdraw_day: effectiveWithdrawDay }),
+};
+
+const response = await fetch(
+  `${paymentProxyBaseUrl}${paymentAction.href}`,
+  {
+    method: "PUT",
+    headers: {
+      "x-api-key": process.env.HS_API_KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(paymentMethod),
+  }
+);
+
+if (response.status !== 200) {
+  throw new Error(`Payment method failed with HTTP ${response.status}`);
+}
+```
+
+`paymentProxyBaseUrl` is the PCI proxy URL provided during onboarding. Keep the API key and proxy URL in server-side secret/configuration storage.
+
+### Staging Test Fixture
+
+Anthem and Wellpoint provided the following personal savings account for Elevance staging. Use these values only in staging tests and never in production. Build production requests from the consumer's actual bank and billing information.
+
+```json
+{
+  "first_name": "Test",
+  "last_name": "Applicant",
+  "eft_routing": "071205850",
+  "eft_number": "23487289374982",
+  "eft_type": "savings",
+  "eft_level": "personal",
+  "bank_name": "Test Bank"
+}
+```
+
+The carrier's `PERSONALSAVINGS` account type maps to `eft_type: "savings"` plus `eft_level: "personal"`. The API still requires separate `first_name` and `last_name` fields; synthetic account-holder values are accepted for this staging fixture.
+
+This fixture was verified with HealthKeepers Virginia on July 27, 2026 and Wellpoint Texas on July 29, 2026. `PUT /payment_method` returned `200` with the account masked as `****4982`. Recurring requests using `payment_type: "both"` and `withdraw_day: 12` then received `202` from `/submit` and remained `pending_effectuation` without carrier errors through 90 seconds of polling. This confirms the payment method and submission were accepted; it does not confirm payment collection or final effectuation.
+
+Required fields:
+
+- `payment_method_type`: use `"bank_account"` for the current public EnrollConnect integration.
+- `first_name`, `last_name`: names on the bank account.
+- `address`: billing address with `street_address_1`, `city`, `state`, and `zip_code`.
+- `eft_routing`: nine-digit ABA routing number.
+- `eft_number`: bank account number.
+- `eft_type`: `"checking"` or `"savings"`.
+- `eft_level`: `"personal"` or `"business"`.
+- `bank_name`: financial institution name.
+- `payment_type`: the endpoint enum is `"initial"`, `"both"`, or `"recurring"`. Use `"initial"` for binder only or `"both"` for binder plus recurring premiums. There is no current Anthem or Wellpoint use case for `"recurring"` without an initial payment; that request returns `422`.
+
+Optional fields:
+
+- `withdraw_day`: recurring withdrawal day from 1 through 28. Applies with `payment_type: "both"` and defaults to `1` when omitted.
+- `address.street_address_2`: second billing address line.
+
+### Payment Roles
+
+HealthSherpa securely transmits the bank and payment-selection data from the platform to Anthem or Wellpoint but does not initiate withdrawals.
+
+- With `payment_type: "initial"`, the carrier debits only the first payment.
+- With `payment_type: "both"`, the carrier debits the first payment and recurring monthly premiums using `withdraw_day` for the monthly schedule.
+
+### Success Response
+
+```json
+{
+  "payment_method_type": "bank_account",
+  "payment_type": "both",
+  "masked_account": "****4982",
+  "status": "active",
+  "is_recurring": true,
+  "withdraw_day": 12
+}
+```
+
+A `200` response confirms that the payment method was saved. It does not confirm that the carrier collected payment or effectuated coverage. Only call `/submit` after this request succeeds.
+
+`POST /submit` returns 202 with `application_id` when the background submission job is queued. It does not return `policy_status`. Poll the application with backoff and continue through `sep_docs_under_review` and `pending_effectuation`, because both are intermediate states. Stop on lifecycle terminal states `effectuated`, `cancelled`, or `terminated`. Stop the current polling attempt at `submission_failed`, then read `errors`, remediate, and resubmit. Treat `effectuated` as success even if no poll observed either intermediate state. An immediate `draft` response is transient; if it remains `draft` for more than one hour, alert and reconcile instead of resubmitting automatically.
+
+| Status | Meaning |
+|---|---|
+| 200 | Payment method saved; response contains masked account details |
+| 401 | API key is missing or invalid |
+| 404 | Application was not found |
+| 422 | Payment is unavailable for the application or a field is invalid |
 
 ## GET /payment_redirect
 
@@ -45,15 +210,16 @@ GET /api/v1/applications/:id/payment_redirect
 | Status | Meaning |
 |---|---|
 | 200 | Returns `{endpoint, method: "POST", fields: [{name, value}]}` |
-| 404 | Carrier doesn't support redirect |
-| 422 | Application not yet submitted |
+| 404 | Application was not found, or the carrier does not support payment redirect |
+| 422 | Application has not been submitted or another redirect prerequisite is invalid |
 
-Build a hidden HTML form from the response and auto-submit it to redirect the user to the carrier's payment page. Validate that `endpoint` begins with `https://` and HTML-escape every interpolated value (`endpoint`, each `field.name`, each `field.value`) before insertion. Carrier-supplied field values may legitimately contain characters that break unescaped HTML, and defense-in-depth requires escaping even though the response originates from HealthSherpa.
+Build a hidden HTML form from the response and auto-submit it to redirect the user to the carrier's payment page. Use the returned `method`, and require it to be `POST`. Validate that `endpoint` begins with `https://` and HTML-escape every interpolated value (`endpoint`, `method`, each `field.name`, and each `field.value`) before insertion. Carrier-supplied field values may legitimately contain characters that break unescaped HTML, and defense-in-depth requires escaping even though the response originates from HealthSherpa.
 
 ```html
 <!-- Pseudocode. htmlEscape() must escape &, <, >, ", ' -->
 <!-- Validate endpoint.startsWith("https://") before rendering. -->
-<form id="payment-form" method="POST" action="${htmlEscape(endpoint)}">
+<!-- Require method.toUpperCase() === "POST". -->
+<form id="payment-form" method="${htmlEscape(method)}" action="${htmlEscape(endpoint)}">
   <!-- For each field in fields[]: -->
   <input type="hidden"
          name="${htmlEscape(field.name)}"
@@ -62,7 +228,7 @@ Build a hidden HTML form from the response and auto-submit it to redirect the us
 <script>document.getElementById('payment-form').submit();</script>
 ```
 
-The carrier handles payment collection. HealthSherpa does not process payments.
+For redirect flows, the carrier page handles payment collection. For in-flow ACH, HealthSherpa securely accepts and forwards the payment method as part of carrier submission.
 
 ## Carrier-Reported Payment Status
 
@@ -112,11 +278,11 @@ Content-Type: multipart/form-data
 
 Fields:
 - `file` — the binary file
-- `document_type` — `"sep"` (required)
+- `document_type` — `"sep"` for qualifying-event proof or `"proof_of_residency"` for required residency proof
 
 ### Rules
 
-- `document_type` is required. The API rejects uploads without it. The only accepted value is `"sep"`.
+- `document_type` is required. The API rejects uploads without it.
 - Max file size is **carrier-dependent**. Most carriers allow ~2 MB, but some are higher (currently Oscar 50 MB, HCSC 10 MB) and limits change over time. Do not hardcode a fixed cap; if an upload is rejected for size, check the carrier's current limit with your account manager.
 - Supported formats: PDF, PNG, JPG.
 - Upload BEFORE calling `/submit`.

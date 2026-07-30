@@ -24,7 +24,7 @@
     {
       "id": 2,
       "prompt": "Write the code to create a complete enrollment application for a 30-year-old female named Jane Smith in Phoenix, AZ (85001, FIPS 04013). She has a $500/month ICHRA from employer 'Acme Corp' (FEIN 123456789). Plan HIOS is 53901AZ1490005, plan year 2026. The SEP reason is offered_ichra with event date 2026-03-01. Her agent is Bob Williams (NPN 98765432). Follow the full enrollment workflow from the skill, including fetching carrier-specific attestation content before building the payload. Include everything needed so this application can be immediately submitted.",
-      "expected_output": "A POST to the correct base URL + /api/v1/applications with a complete payload that would pass validation for any carrier.",
+      "expected_output": "A requirements-driven POST to the correct base URL + /api/v1/applications with a complete payload for the selected plan.",
       "assertions": [
         "Uses the correct base URL (https://api.ichra.healthsherpa.com or https://api.ichra-staging.healthsherpa.com)",
         "POSTs to /api/v1/applications with x-api-key header and Content-Type: application/json",
@@ -43,15 +43,17 @@
         "Includes attestations with electronic_signature_consent: true and agrees_issuer_attestations: true",
         "Includes special_enrollment_period with event_type and event_date",
         "Does NOT set desired_effective_date (should omit it or explain why it's risky)",
-        "Fetches enrollment_requirements via GET /plans/:hios_id?include=enrollment_requirements BEFORE presenting attestations",
-        "Uses the carrier-specific attestation text from enrollment_requirements as the actual consent labels — does NOT use generic labels like 'I agree to issuer attestations'",
-        "Only renders attestation fields that are present in the enrollment_requirements response"
+        "Fetches enrollment_requirements via GET /plans/:hios_id?include=enrollment_requirements before collecting carrier-specific fields",
+        "Uses carrier-specific attestation text, options maps, and required flags instead of generic consent labels or key presence alone",
+        "Uses a special_enrollment_period.event_types key returned for the selected plan and interprets event_date_days_before and event_date_days_after relative to today",
+        "Processes returned applicant, communication-preference, HRA, and proof-of-residency requirements in addition to attestations",
+        "When enrollment_requirements.hra.per_applicant_hra is true, sends HRA answers under the primary and every non-child dependent relationship supported by the carrier using returned contribution_covers values, and does not send them for children"
       ]
     },
     {
       "id": 3,
       "prompt": "After creating an application, the response includes an errors array with a 'supporting_documentation_required' entry. Write the code to upload a PDF file as SEP documentation and then submit the application. Use the application_id from the create response.",
-      "expected_output": "Code that uploads a document with the correct document_type, then submits the application.",
+      "expected_output": "Code that uploads a document with the correct document_type, submits the application, and tracks the asynchronous submission result.",
       "assertions": [
         "POSTs to /api/v1/applications/:id/supporting_documentation",
         "Includes document_type: 'sep' as a top-level field alongside the file — not nested inside the file object",
@@ -59,22 +61,33 @@
         "For multipart upload: sends file as binary with document_type as a separate form field",
         "Uploads the document BEFORE calling submit, not after",
         "Submits via POST to /api/v1/applications/:id/submit after upload succeeds",
-        "Expects 202 Accepted from submit (not 200)"
+        "Expects 202 Accepted from submit with application_id and does not expect policy_status in the submit response",
+        "Polls GET /api/v1/applications/:id through sep_docs_under_review and pending_effectuation because both are intermediate; stops on lifecycle terminal states effectuated, cancelled, or terminated; stops the current attempt at submission_failed for remediation and resubmission; and alerts if draft exceeds a one-hour submission grace period"
       ]
     },
     {
       "id": 4,
-      "prompt": "After submitting an application, I need to handle payment. Write code that reads the payment_instructions from the application response, determines the correct payment flow, and if payment redirect is supported, calls the payment redirect endpoint and builds an HTML form to send the user to the carrier's payment page.",
-      "expected_output": "Code that implements the payment decision tree and builds a form POST from the payment redirect response.",
+      "prompt": "After creating an application, I need to handle payment. Write code that reads payment_instructions and next_actions, handles a payment method required with submission, and otherwise handles payment redirect after submission.",
+      "expected_output": "Code that sends required in-flow ACH before submit or handles the carrier payment redirect after submit, based on the application response.",
       "assertions": [
         "Reads payment_instructions from the application response — does not hardcode payment behavior",
-        "Checks payment_redirect_supported (pay after submit)",
-        "Checks pay_by_phone_supported as fallback (show phone number)",
+        "When payment_required_with_submission is true, finds rel: payment_method in next_actions and requires method PUT plus a relative href matching the current application",
+        "Rejects an absent or invalid payment_method action, including absolute URLs, unexpected methods, paths, or application ID mismatches, instead of submitting bank data",
+        "Sends the payment_method request through the PCI-compliant proxy URL provided by HealthSherpa, not from browser code",
+        "Uses payment_method_type: bank_account for the current public integration",
+        "Builds the payment request object at runtime from billing, bank account, and payment-selection data; does not read a reusable request file or hardcode test fixtures in production code",
+        "For recurring ACH, normalizes an omitted withdraw_day to 1 and sends that value",
+        "Requires exactly HTTP 200 from payment_method before calling POST /api/v1/applications/:id/submit",
+        "When payment_required_with_submission is false, submits first and then checks payment_redirect_supported",
+        "Checks pay_by_phone_supported and shows payment_phone_number when that option is available",
         "Calls GET /api/v1/applications/:id/payment_redirect — uses GET, not POST",
+        "Requires the payment redirect response method to be POST and the endpoint to begin with https://",
         "Builds an HTML form with method and action from the response endpoint",
         "Includes all fields from the response fields array as hidden inputs",
+        "HTML-escapes endpoint, method, every field name, and every field value while preserving their semantic values",
         "Auto-submits the form or provides a mechanism to redirect the user's browser",
-        "Does NOT try to parse or interpret the field names/values — passes them through exactly"
+        "Does NOT try to parse or interpret the redirect field names/values; passes them through exactly",
+        "Does not log eft_routing, eft_number, or the full payment request"
       ]
     },
     {
@@ -135,7 +148,10 @@
         "Polls more frequently right after submission (every ~5 minutes for the first hour)",
         "Reduces frequency for awaiting effectuation (~30 minutes)",
         "Drops to steady-state interval (~4 hours) or switches to webhook-driven",
+        "Treats draft immediately after a 202 submit response as a transient background-job state, not a successful submission or failure",
+        "Alerts and reconciles instead of automatically resubmitting when draft lasts beyond a one-hour submission grace period",
         "Treats pending_effectuation as an expected intermediate state, not an error",
+        "Treats effectuated as success even if no poll observed pending_effectuation",
         "Handles submission_failed status as an error requiring attention (alert or retry)",
         "Flags or alerts if pending_effectuation persists beyond 48 hours",
         "Terminates polling on final states: effectuated, cancelled, terminated",
@@ -243,6 +259,121 @@
         "Fetches enrollment_requirements to get the valid pediatric_dental option values rather than hardcoding them",
         "Does not hardcode plan or dental plan HIOS IDs",
         "On update (PUT), notes that switching paths requires sending null for the field being cleared"
+      ]
+    },
+    {
+      "id": 16,
+      "prompt": "Build the broker-assisted EnrollConnect flow for an Anthem or Wellpoint plan. The application response has payment_required_with_submission: true and a payment_method next action. The member wants ACH for the binder payment and recurring premiums, withdrawn on day 12. Show the carrier-specific enrollment fields, payment request, and submit order.",
+      "expected_output": "A complete Anthem or Wellpoint flow that creates the application, resolves prerequisites, saves recurring ACH through the PCI proxy, and submits only after the payment method succeeds.",
+      "assertions": [
+        "Uses the Anthem and Wellpoint brand names in integrator-facing guidance",
+        "Includes marital_status and currently_incarcerated on the primary applicant",
+        "Includes agent_of_record.carrier_producer_code for a broker-assisted enrollment and explains that it is the carrier-issued encrypted agent TIN, not an agency identifier, with exactly 10 uppercase letters ending in Y or Z",
+        "Includes attestations.consumer_working_with_agent: true for the broker-assisted flow",
+        "Fetches enrollment_requirements for the selected plan and processes returned attestations, communication preferences, primary-applicant requirements, and state supplements",
+        "When Anthem plan requirements return email_contact_consent, displays the returned content and sends an explicit boolean at communication_preferences.email_contact_consent; both true and false are valid",
+        "When Wellpoint Texas requirements return communication-impairment questions, sends applicants.primary.has_communication_impairment and conditionally sends communication_impairment_format plus communication_impairment_format_other",
+        "When the Texas HMO consumer-choice disclosure is returned, sends attestations.disclosure_statement_accepted: true",
+        "Checks create or GET errors for supporting_documentation_required and uploads required SEP documentation before submit",
+        "Treats missing_required_field for payment_method as a resolvable prerequisite when payment_required_with_submission is true instead of stopping the flow",
+        "Checks payment_instructions.payment_required_with_submission and finds rel: payment_method in next_actions with method PUT and a relative href matching the current application",
+        "Stops and contacts HealthSherpa if payment is required but the payment_method next action is absent or invalid",
+        "Calls PUT /api/v1/applications/:id/payment_method through the HealthSherpa-provided PCI proxy before POST /submit",
+        "Builds the payment request object at runtime from the consumer's billing, bank account, and payment-selection data",
+        "Uses payment_method_type: bank_account and includes billing name, billing address, eft_routing, eft_number, eft_type, eft_level, bank_name, and payment_type",
+        "Uses payment_type: both for binder plus recurring premiums and sets withdraw_day: 12",
+        "Explains that recurring is an endpoint enum value but has no current Anthem or Wellpoint use case without an initial payment and returns 422",
+        "Explains that withdraw_day accepts 1 through 28 and defaults to 1 when omitted",
+        "Explains that HealthSherpa transmits the payment selection to Anthem or Wellpoint and the carrier initiates the debit",
+        "If staging fixtures are shown, uses the designated fake SSN and the carrier-provided Elevance savings fixture (routing 071205850, account 23487289374982, eft_type savings, eft_level personal), labels all fixtures staging-only, and excludes them from production code",
+        "Requires 200 OK from payment_method before calling POST /api/v1/applications/:id/submit",
+        "Expects POST /submit to return 202 with application_id and does not expect policy_status in that response",
+        "Polls GET /applications/:id through sep_docs_under_review and pending_effectuation because both are intermediate; stops on lifecycle terminal states effectuated, cancelled, or terminated; stops the current attempt at submission_failed for remediation and resubmission; and alerts if draft exceeds a one-hour submission grace period",
+        "Handles the response fields payment_method_type, payment_type, masked_account, status, is_recurring, and withdraw_day",
+        "Keeps the current public payment integration scoped to ACH bank accounts",
+        "Does not log eft_routing, eft_number, or the full payment request"
+      ]
+    },
+    {
+      "id": 17,
+      "prompt": "Build the broker-assisted EnrollConnect flow for a Wellpoint Texas plan. Plan enrollment requirements include the communication-impairment questions and Texas HMO consumer-choice disclosure. The consumer selects Braille and wants ACH for the binder payment and recurring premiums on day 12.",
+      "expected_output": "A complete Wellpoint Texas flow that collects and submits the accessible-materials and disclosure requirements, saves recurring ACH through the PCI proxy, and submits only after all prerequisites succeed.",
+      "assertions": [
+        "Fetches GET /plans/:hios_id with include=enrollment_requirements and uses the returned primary-applicant questions, options, and conditional requiredness",
+        "Sends applicants.primary.has_communication_impairment: true",
+        "Sends applicants.primary.communication_impairment_format: braille and does not send communication_impairment_format_other for Braille",
+        "Explains that has_communication_impairment: false is an explicit No and requires both format fields to be omitted",
+        "Explains that communication_impairment_format: other requires communication_impairment_format_other with an allowed value",
+        "Sends attestations.disclosure_statement_accepted: true because the Texas HMO disclosure was returned",
+        "Requires disclosure_statement_accepted only when content_data.disclosure_statement_checkbox_label is present",
+        "Explains that a Texas HMO disclosure without a checkbox label must be displayed but does not require disclosure_statement_accepted",
+        "Includes marital_status, currently_incarcerated, consumer_working_with_agent, and the carrier-issued agent_of_record.carrier_producer_code",
+        "Resolves required SEP documentation before submission",
+        "Requires and validates the relative payment_method next action and sends it through the HealthSherpa-provided PCI proxy",
+        "Uses payment_method_type: bank_account, payment_type: both, and withdraw_day: 12",
+        "Requires HTTP 200 from payment_method before POST /submit",
+        "Treats POST /submit 202 as queued, continues polling through sep_docs_under_review and pending_effectuation, stops on lifecycle terminal states effectuated, cancelled, or terminated, and treats submission_failed as a polling-stop state that requires remediation and resubmission",
+        "Does not log EFT routing, account number, or the full payment request"
+      ]
+    },
+    {
+      "id": 18,
+      "prompt": "Build the broker-assisted EnrollConnect flow for an Anthem Virginia plan. Plan enrollment requirements include the electronic communications preference. The consumer answers No and wants ACH for the binder payment and recurring premiums on day 12.",
+      "expected_output": "A complete Anthem flow that presents the carrier electronic-communications text, preserves the explicit No answer, saves recurring ACH through the PCI proxy, and submits only after all prerequisites succeed.",
+      "assertions": [
+        "Fetches GET /plans/:hios_id with include=enrollment_requirements and displays the returned email_contact_consent question, full carrier content, and boolean Yes/No options array",
+        "Sends communication_preferences.email_contact_consent: false and explains that false is a valid required answer",
+        "Includes marital_status, currently_incarcerated, consumer_working_with_agent, and the carrier-issued agent_of_record.carrier_producer_code",
+        "Resolves required SEP documentation before submission",
+        "Requires and validates the relative payment_method next action and sends it through the HealthSherpa-provided PCI proxy",
+        "Uses payment_method_type: bank_account, payment_type: both, and withdraw_day: 12",
+        "Requires HTTP 200 from payment_method before POST /submit",
+        "Treats POST /submit 202 as queued, continues polling through sep_docs_under_review and pending_effectuation, stops on lifecycle terminal states effectuated, cancelled, or terminated, and treats submission_failed as a polling-stop state that requires remediation and resubmission",
+        "Does not log EFT routing, account number, or the full payment request"
+      ]
+    },
+    {
+      "id": 19,
+      "prompt": "Build an EnrollConnect flow for an Anthem Nevada plan whose plan requirements include electronic communications consent and proof of residency. The consumer answers Yes and has a Nevada ID PDF to upload.",
+      "expected_output": "A requirements-driven Anthem Nevada flow that collects electronic consent, uploads residency proof with the correct document type, resolves other prerequisites, and submits safely.",
+      "assertions": [
+        "Fetches GET /plans/:hios_id with include=enrollment_requirements",
+        "Displays the returned email_contact_consent content and sends communication_preferences.email_contact_consent: true",
+        "Reads proof_of_residency_required and displays proof_of_residency_text",
+        "Uploads the PDF through POST /applications/:id/supporting_documentation with document_type: proof_of_residency",
+        "Does not mislabel the residency document as document_type: sep",
+        "Resolves required payment_method and SEP documentation independently when those prerequisites are also returned",
+        "Calls POST /submit only after required documents and payment succeed"
+      ]
+    },
+    {
+      "id": 20,
+      "prompt": "Build a multi-member EnrollConnect application when plan enrollment requirements return hra.per_applicant_hra: true and the QSEHRA household follow-up. The household includes a primary applicant and spouse with different HRA answers.",
+      "expected_output": "A requirements-driven application that preserves top-level employer data, sends primary and spouse HRA answers, uses returned contribution enums, and sends the conditional household QSEHRA answer.",
+      "assertions": [
+        "Keeps the top-level hra object with employer name, FEIN, and address",
+        "Sends hra under applicants.primary and the spouse dependent because per_applicant_hra is true",
+        "Uses contribution_covers values returned under enrollment_requirements.hra for each HRA type",
+        "Sends the household answer at top-level qsehra_both_employers_claim_reimbursement when the returned condition applies",
+        "Does not assume the top-level HRA answer automatically covers every adult when per_applicant_hra is true",
+        "Includes the spouse relationship and other required applicant identity fields"
+      ]
+    },
+    {
+      "id": 21,
+      "prompt": "Parse a GET /api/v1/plans/:hios_id?include=enrollment_requirements response and build the enrollment form. Explain how to use the returned SEP reasons, attestations, applicant requirements, HRA requirements, communication preferences, and proof-of-residency fields.",
+      "expected_output": "A parser that follows the deployed plan response shape and derives enrollment fields without hardcoded carrier assumptions.",
+      "assertions": [
+        "Reads plan data from response.plan",
+        "Treats special_enrollment_period.event_types as an object keyed by request enum, not an array",
+        "Uses event_date_days_before as the maximum past event age and event_date_days_after as the maximum future event offset relative to today",
+        "Uses documentation_required to determine whether SEP proof is needed",
+        "Uses attestation content, required flags, attestation_text, and options maps according to each returned attestation shape",
+        "Processes applicants.primary and applicants.dependents requirements independently",
+        "Processes communication_preferences, hra, proof_of_residency_required, and proof_of_residency_text when returned",
+        "Treats estimated_rate as a boolean plan attribute rather than a premium",
+        "Treats benefits and benefits_pretty as keyed objects rather than arrays",
+        "Does not infer requirements from carrier name when response metadata is available"
       ]
     }
   ]

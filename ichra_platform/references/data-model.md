@@ -138,9 +138,12 @@ Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_lin
 | `uses_tobacco` | boolean | NOT `tobacco_use` |
 | `us_citizen` | boolean | |
 | `resides_in_state` | boolean | |
+| `currently_incarcerated` | boolean | Carrier-specific. Include for Anthem and Wellpoint. |
+| `marital_status` | enum | Carrier-specific. `single`, `married`, `domestic_partner`; Anthem and Wellpoint accept all three. |
 | `race_ethnicity` | enum | `white`, `black_or_african_american`, `asian_indian`, `chinese`, `filipino`, `japanese`, `korean`, `vietnamese`, `native_hawaiian`, `guamanian_or_chamorro`, `samoan`, `american_indian_or_alaskan_native`, `decline_to_answer` |
 | `hispanic_origin` | enum | `yes`, `no`, `decline_to_answer` |
 | `hispanic_origin_description` | enum | Only when `hispanic_origin: "yes"`. Values: `cuban`, `mexican_mexican_american_or_chicanx`, `puerto_rican`, `other_hispanic_latino_or_spanish_origin`, `decline_to_answer` |
+| `hra` | object | Send for the primary and every non-child dependent when `enrollment_requirements.hra.per_applicant_hra` is true. Do not send for children. |
 | `existing_coverage` | object | `{has_existing_coverage, plan_replaces_existing_coverage, type, insurer, policy_id, policyholder_name, start_date, term_date, will_continue}`. `type` is `"issuer"` or `"government"`. |
 | `signature` | string | Typed full legal name. Required on primary for submission. |
 
@@ -153,6 +156,9 @@ Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_lin
 | `phone` | string | |
 | `phone_type` | enum | `cell`, `home`, `work` |
 | `language_spoken`, `language_written` | enum | `english`, `spanish`, `arabic`, `chinese`, `french_creole`, `french`, `german`, `gujarati`, `hindi`, `korean`, `polish`, `portuguese`, `russian`, `tagalog`, `urdu`, `vietnamese`, `other` |
+| `has_communication_impairment` | boolean | Required when returned in `enrollment_requirements.applicants.primary`. Both `true` and `false` are valid answers. |
+| `communication_impairment_format` | enum | Required when `has_communication_impairment` is true. `braille`, `large_print`, `audio`, `other`. |
+| `communication_impairment_format_other` | enum | Required when format is `other`. `encrypted_audio_cd`, `encrypted_data_cd`. |
 | `guardian` | object | See Guardian |
 | `responsible_party` | object | See EnrollConnect YML spec for full fields |
 | `translator` | object | `{first_name, middle_name, last_name, reason}` |
@@ -208,7 +214,7 @@ Strongly recommended. Without agent of record, the enrollment may not be attribu
     "first_name": "Jane",
     "last_name": "Agent",
     "national_producer_number": "12345678",
-    "carrier_producer_code": "ABC123",
+    "carrier_producer_code": "KJNNKJSJUY",
     "state_license_number": "SL456",
     "email": "agent@example.com",
     "phone": "2125550100",
@@ -222,6 +228,8 @@ Strongly recommended. Without agent of record, the enrollment may not be attribu
   }
 }
 ```
+
+`carrier_producer_code` is carrier-specific. For Anthem and Wellpoint broker-assisted enrollments, it is the carrier-issued encrypted agent TIN, not an agency identifier. It must contain exactly 10 uppercase letters and end in `Y` or `Z`.
 
 ## HRA & Employer
 
@@ -258,6 +266,14 @@ Strongly recommended. Without agent of record, the enrollment may not be attribu
 
 Employer address is nested under an `address` sub-object within the employer, using the same address schema as `residential_address`.
 
+When `plan.enrollment_requirements.hra.per_applicant_hra` is true, also send
+`hra` under `applicants.primary` and every non-child dependent relationship
+supported by the selected carrier. Do not send per-applicant HRA answers for
+children. Use the returned
+`contribution_covers.ichra` and `contribution_covers.qsehra` values. If the
+QSEHRA household condition applies, send the answer at top-level
+`qsehra_both_employers_claim_reimbursement`.
+
 ## Special Enrollment Period
 
 ```json
@@ -269,9 +285,11 @@ Employer address is nested under an `address` sub-object within the employer, us
 }
 ```
 
-Common values: `offered_ichra`, `offered_qsehra`, `loss_of_mec`, `birth`, `adoption`, `marriage`, `relocation`, `domestic_partnership`, `released_from_incarceration`, `lost_aptc`.
-
-Each carrier supports a different subset. Always send the canonical value — HealthSherpa maps it to the carrier's internal format. If a carrier doesn't support a given SEP reason, the API returns a 422 with a descriptive error.
+Each carrier supports a different subset. Read
+`plan.enrollment_requirements.special_enrollment_period.event_types` and send
+only a returned key. Each value states how far the event date may be before or
+after today and whether documentation is required. HealthSherpa maps the
+canonical key to the carrier's internal format.
 
 ## Attestations
 
@@ -284,16 +302,21 @@ Each carrier supports a different subset. Always send the canonical value — He
     "disclosure_statement_accepted": true,
     "coverage_replacement_attestation_accepted": false,
     "pediatric_dental": "purchased_separately",
-    "pediatric_dental_attestation": true,
     "agent_submitted_application": true,
     "agent_provided_consumer_marketing_materials": true,
     "agent_advised_consumer_of_product_features": true,
-    "agent_retained_signed_application_copy": true
+    "agent_retained_signed_application_copy": true,
+    "consumer_working_with_agent": true
   }
 }
 ```
 
-Most fields are booleans. `pediatric_dental` is a string enum (`"purchased_separately"` or `"not_applicable"`) — get the legal text and valid options from `GET /plans/:hios_id?plan_year=2026&include=enrollment_requirements`. Present legal text to the consumer before setting values.
+Most fields are booleans. `pediatric_dental` is a string enum. When
+`enrollment_requirements.attestations.pediatric_dental.required` is true,
+present `attestation_text`, display the labels from its `{value: label}`
+`options` map, and submit the selected key. HCSC qualified-dental applications
+still require exactly one of this attestation or `dental_plan_hios_id` when the
+returned `required` flag is false.
 
 For carriers that offer qualified dental (currently HCSC), `attestations.pediatric_dental` is the **attestation** path for satisfying the ACA pediatric dental requirement. The alternative is buying a stand-alone dental plan via the top-level `dental_plan_hios_id`. Send exactly one of the two — both, or neither, returns a `422` (`Invalid dental selection`). See "Qualified Dental (HCSC)" in SKILL.md.
 
@@ -336,6 +359,11 @@ State supplements by state: CO (`primary`, `disclosures`), UT (`primary`, `spous
 }
 ```
 
+When plan lookup returns
+`enrollment_requirements.communication_preferences.email_contact_consent.required: true`,
+display the returned question and content, then send an explicit boolean at
+`communication_preferences.email_contact_consent`. A false answer is valid and must not be treated as missing.
+
 ## Response-Only Fields
 
 | Field | Description |
@@ -345,14 +373,27 @@ State supplements by state: CO (`primary`, `disclosures`), UT (`primary`, `spous
 | `document_status` | `none_needed`, `required`, `uploaded`, `verified`, `denied` |
 | `sep_reason` | Echoed SEP reason (may differ from input — see API Behavior Notes in SKILL.md) |
 | `policies` | Array of policy objects (populated post-submission) |
-| `payment_instructions` | Carrier payment configuration (see [payment-and-documents.md](payment-and-documents.md)) |
+| `payment_instructions` | Carrier payment configuration. When `payment_required_with_submission` is `true`, provide the payment method before submit (see [payment-and-documents.md](payment-and-documents.md)). |
 | `payment` | Carrier-reported payment data (may be null for days/weeks) |
 | `errors` | Validation/prerequisite errors — empty array means ready to submit |
-| `next_actions` | HATEOAS links: `[{rel, href, method}]` — use these to drive UI. Includes `change_plan` when plan changes are available. |
+| `next_actions` | HATEOAS links: `[{rel, href, method}]`. Use these to drive UI. Includes `payment_method` when in-flow payment is available and `change_plan` when plan changes are available. |
 | `supports_changes` | Whether the carrier supports post-enrollment changes for this application |
 | `can_change_plan` | Whether a plan change is currently allowed (requires Open Enrollment + carrier support) |
 | `can_report_change` | Whether demographic changes can be submitted |
 | `created_at`, `updated_at`, `submitted_at` | ISO 8601 timestamps |
+
+### Payment Method Response
+
+`PUT /api/v1/applications/:id/payment_method` returns masked payment details. The current public integration supports ACH bank accounts.
+
+| Field | Type | Description |
+|---|---|---|
+| `payment_method_type` | enum | `"bank_account"` |
+| `payment_type` | enum | `"initial"`, `"both"`, or `"recurring"`. Current Anthem and Wellpoint flows use `"initial"` or `"both"`; `"recurring"` without an initial payment returns `422`. |
+| `masked_account` | string | Account number masked except for the last four digits |
+| `status` | enum | `"active"` or `"inactive"` |
+| `is_recurring` | boolean | Whether the saved method covers recurring premiums |
+| `withdraw_day` | integer or null | Recurring withdrawal day from 1 through 28; null for binder-only payments |
 
 ### Events Timeline
 

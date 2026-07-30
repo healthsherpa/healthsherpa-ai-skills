@@ -198,36 +198,64 @@ GET /api/v1/plans/53901AZ1490005?plan_year=2026
 
 Returns `api_enrollment` and `deeplink_enrollment` flags plus full plan metadata. Use this to confirm enrollment path when you already have a plan selected.
 
-### Attestation Content
+Plan-detail response shape:
 
-Add `?include=enrollment_requirements` to get carrier-specific requirements and attestation text:
+- `estimated_rate` is a boolean indicating whether an ancillary plan uses estimated rates; it is not a premium.
+- `benefits` is an object mapping benefit keys to formatted cost-sharing text.
+- `benefits_with_tier_2` is an object mapping benefit keys to booleans.
+- `benefits_pretty` is an object mapping benefit keys to `{original, before, after}` display values.
+- `benefits_explanations` is an object mapping benefit keys to explanatory text.
+- `cost_sharing` is an object whose values can be formatted strings, integer visit counts, or null.
+
+### Enrollment Requirements
+
+Add `?include=enrollment_requirements` to get carrier-specific enrollment metadata:
 
 ```
-GET /api/v1/plans/53901AZ1490005?plan_year=2026&include=enrollment_requirements
+GET /api/v1/plans/35107NV0010017?plan_year=2026&include=enrollment_requirements
 ```
 
-The response includes `enrollment_requirements.attestations`:
+The response nests requirements under `plan.enrollment_requirements`. The example below shows representative groups; keys that do not apply to the selected plan are omitted.
 
 ```json
 {
-  "enrollment_requirements": {
-    "attestations": {
-      "agrees_issuer_attestations": {
-        "content": "I acknowledge that I have read..."
+  "plan": {
+    "enrollment_requirements": {
+      "attestations": {
+        "agrees_issuer_attestations": {
+          "content": "I acknowledge that I have read..."
+        },
+        "electronic_signature_consent": {
+          "content": "%{signature_name}, type your full name to sign electronically."
+        },
+        "pediatric_dental": {
+          "required": false,
+          "type": "attestation",
+          "attestation_text": "Pediatric dental disclosure text...",
+          "options": {
+            "purchased_separately": "Consumer-facing attestation label...",
+            "not_applicable": "There are no children under 19..."
+          }
+        }
       },
-      "electronic_signature_consent": {
-        "content": "%{signature_name}, type your full name to sign electronically."
+      "special_enrollment_period": {
+        "event_types": {
+          "offered_ichra": {
+            "event_date_days_before": 60,
+            "event_date_days_after": 60,
+            "documentation_required": false
+          }
+        }
       },
-      "broker_signature_attestation": {
-        "content": "I attest that I have obtained written consent..."
+      "applicants": {
+        "primary": {
+          "marital_status": {
+            "required": false,
+            "options": ["single", "married"]
+          }
+        }
       },
-      "pediatric_dental": {
-        "content": "Individuals must purchase pediatric dental benefits...",
-        "options": ["purchased_separately", "not_applicable"]
-      },
-      "state_supplement_primary_signature": {
-        "content": ["I acknowledge that I have read all sections...", "I understand that my answers are the basis..."]
-      }
+      "proof_of_residency_required": false
     }
   }
 }
@@ -236,7 +264,11 @@ The response includes `enrollment_requirements.attestations`:
 **Key rules:**
 - Keys that are absent or null are not required for that carrier/state.
 - `electronic_signature_consent.content` may contain `%{signature_name}` — replace with the applicant's full legal name before displaying. All other placeholders are resolved server-side.
-- `pediatric_dental.options` lists the valid values for the `pediatric_dental` field on the application.
+- `pediatric_dental.options` is a `{value: label}` map. Display the label and submit the selected key as `attestations.pediatric_dental`.
+- HCSC qualified-dental applications require exactly one of `attestations.pediatric_dental` or `dental_plan_hios_id`, even when the returned pediatric-dental `required` flag is false.
+- `special_enrollment_period.event_types` is an object keyed by the request enum. Use only returned keys, enforce the returned date window, and follow `documentation_required`.
+- `event_date_days_before` is how far the event date may be in the past relative to today; `event_date_days_after` is how far it may be in the future.
+- Process returned applicant, communication-preference, HRA, and proof-of-residency requirements in addition to attestations.
 - `state_supplement_*` content may be an array of paragraphs.
 - Call once when the user selects a plan. Cache the result.
 
