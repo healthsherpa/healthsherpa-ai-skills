@@ -1,12 +1,12 @@
 # EnrollConnect API — Example Create & Submit Requests by Carrier
 
-_Reference examples for building successful off-exchange ICHRA enrollments through the EnrollConnect API. Each example passes the target carrier's specific validations and was verified end-to-end against HealthSherpa staging._
+_Reference examples for building successful off-exchange ICHRA enrollments through the EnrollConnect API. Each example illustrates the target carrier's specific validations; section-specific notes state the staging validation date and boundary._
 
 > **Synthetic data only.** Every value below (names, SSN, FEIN, phone, email, agent NPN) is a placeholder. Replace all applicant, employer, and agent values with real data before sending. Never commit real PII/PHI to source control or logs.
 
 ## Before you start
 
-> **Verified PY2026, 2026-06-10.** Every example below was run end-to-end against HealthSherpa staging (create -> upload doc where required -> submit -> 202). Plan IDs, ZIP, and FIPS are plan-year- and inventory-specific and rotate each year — treat them as illustrative and always quote for current inventory. Carrier documentation requirements are a point-in-time snapshot; the create response is the source of truth (see the runtime rules below).
+> **Baseline create validation, PY2026, 2026-06-10.** The create payloads below were validated against HealthSherpa staging on this date. Later section-specific notes identify newer validation and the observed status boundary. A 202 submit response only confirms the background job was queued. Continue monitoring through intermediate states until a lifecycle terminal status. If the application reaches `submission_failed`, stop the current polling attempt, remediate the reported errors, and resubmit. Plan IDs, ZIP, and FIPS are plan-year- and inventory-specific and rotate each year. Treat them as illustrative and always quote for current inventory. Carrier documentation requirements are a point-in-time snapshot; the create response is the source of truth.
 
 - **Server-side only.** Call EnrollConnect from a backend you control. Never embed the `x-api-key` in browser or mobile code.
 - **Base URL (production):** `https://api.ichra.healthsherpa.com`  •  **Staging:** `https://api.ichra-staging.healthsherpa.com`
@@ -14,7 +14,7 @@ _Reference examples for building successful off-exchange ICHRA enrollments throu
 - **Quote first.** The plan IDs, ZIP, and FIPS below are illustrative 2026 examples. In production, call `POST /api/v1/quotes` (with `off_ex: true`) to get a current `plan_hios_id` for the member's county, and confirm `api_enrollment: true` on the plan before creating an application.
 - **Fetch requirements.** Call `GET /api/v1/plans/{hios_id}?plan_year=2026&include=enrollment_requirements` to get the carrier's exact attestation text and SEP rules. Render the returned legal text to the consumer — do not use generic labels.
 - **`external_id` is not de-duplicated.** Submitting two creates with the same `external_id` produces two separate applications. Store the `application_id` returned by create and use it for every follow-up call; look up by `external_id` before retrying a create.
-- **Use real, current dates.** `special_enrollment_period.event_date` must fall within the carrier's SEP window (commonly 60 days before or after the event). The dates in these examples are illustrative — replace them with the member's actual event and signature dates.
+- **Use real, current dates.** For the selected SEP reason, the event date may be up to `event_date_days_before` days before today or `event_date_days_after` days after today. The dates in these examples are illustrative — replace them with the member's actual event and signature dates.
 
 ## Conventions used in every example (best practices)
 
@@ -48,9 +48,9 @@ curl -sS -X POST 'https://api.ichra.healthsherpa.com/api/v1/quotes' \
 
 Each returned plan includes `hios_id` plus `api_enrollment` and `deeplink_enrollment` flags. Use the plan's `hios_id` as `plan_hios_id` when you create the application. Enroll through the API only when `api_enrollment: true`; when it is `false`, route the enrollment through Deeplink.
 
-## The flow (3 calls; 4 for document-required carriers)
+## The enrollment flow
 
-**1. Create** — `POST /api/v1/applications` with the carrier payload below. A `201` with an empty `errors` array means it's ready to submit. If `errors` contains `supporting_documentation_required` (or `policy_status` is `sep_docs_required`), upload a document first.
+**1. Create:** `POST /api/v1/applications` with the carrier payload below. A `201` creates the draft, but it can include prerequisites in `errors`. An empty array means it is ready for submit. Route `supporting_documentation_required` to the document step and `missing_required_field` for `payment_method` to the payment step. Stop for other errors.
 
 ```bash
 curl -sS -X POST 'https://api.ichra.healthsherpa.com/api/v1/applications' \
@@ -58,7 +58,7 @@ curl -sS -X POST 'https://api.ichra.healthsherpa.com/api/v1/applications' \
   -d @create_payload.json
 ```
 
-**2. (If required) Upload SEP documentation** — `POST /api/v1/applications/{application_id}/supporting_documentation`. `document_type` must be `"sep"` (only accepted value). **Maximum file size is carrier-dependent** — most carriers allow ~2 MB, but some are higher (currently Oscar 50 MB, HCSC 10 MB) and limits change over time. Keep uploads as small as possible; if a file is rejected for size, check the current limit for that carrier with your account manager.
+**2. (If required) Upload documentation** — `POST /api/v1/applications/{application_id}/supporting_documentation`. Use `document_type: "sep"` for qualifying-event proof or `"proof_of_residency"` when plan requirements indicate residency proof is required. **Maximum file size is carrier-dependent** — most carriers allow ~2 MB, but some are higher (currently Oscar 50 MB, HCSC 10 MB) and limits change over time. Keep uploads as small as possible; if a file is rejected for size, check the current limit for that carrier with your account manager.
 
 ```bash
 curl -sS -X POST 'https://api.ichra.healthsherpa.com/api/v1/applications/{application_id}/supporting_documentation' \
@@ -66,20 +66,22 @@ curl -sS -X POST 'https://api.ichra.healthsherpa.com/api/v1/applications/{applic
   -d '{"file":{"filename":"sep_proof.pdf","content_type":"application/pdf","content_base64":"<base64 of the file>"},"document_type":"sep"}'
 ```
 
-**3. Submit** — `POST /api/v1/applications/{application_id}/submit` (no body). Returns `202 Accepted`; the submission is processed asynchronously.
+**Before submit, check payment instructions.** Read `payment_instructions` and `next_actions` from the create or GET response. When `payment_required_with_submission` is `true`, require the `payment_method` next action. Its method must be `PUT`, and its relative `href` must match the current application. Send the validated `href` through the PCI-compliant proxy URL provided by HealthSherpa and require `200 OK` before submit. See [payment-and-documents.md](payment-and-documents.md).
+
+**3. Submit:** `POST /api/v1/applications/{application_id}/submit` (no body). Call this only after any required document and payment method have been provided. A `202 Accepted` response contains `application_id` and means the background submission job was queued.
 
 ```bash
 curl -sS -X POST 'https://api.ichra.healthsherpa.com/api/v1/applications/{application_id}/submit' \
   -H "x-api-key: $HS_API_KEY" -H 'Content-Type: application/json'
 ```
 
-**4. Track** — poll `GET /api/v1/applications/{application_id}` (or use webhooks) for `pending_effectuation` → `effectuated`. For document carriers the path is `sep_docs_required` → `sep_docs_under_review` → `pending_effectuation`.
+**4. Track:** poll `GET /api/v1/applications/{application_id}` with backoff or use webhooks. Treat `effectuated` as success even if no poll observed `pending_effectuation`. `sep_docs_under_review` and `pending_effectuation` are intermediate states. If the application reaches `submission_failed`, stop the current polling attempt, read `errors`, correct the application or payment data, and resubmit. An immediate `draft` after 202 is transient while the background job runs; if it remains `draft` for more than one hour, alert and reconcile instead of resubmitting automatically.
 
 ---
 
 ## Carrier examples
 
-All carriers below are `api_enrollment: true`. Every payload includes the attestation set that carrier requires (verified via its `enrollment_requirements`). Send the JSON shown to `POST /api/v1/applications`, then run the **Submit** call above.
+All carriers below are `api_enrollment: true`. Every section provides a complete create payload. Fetch `enrollment_requirements` for the selected plan, then follow the document, payment, and submit steps above.
 
 ### Blue Cross and Blue Shield of Arizona
 
@@ -245,6 +247,165 @@ All carriers below are `api_enrollment: true`. Every payload includes the attest
   }
 }
 ```
+
+### Anthem and Wellpoint
+
+- **Plan (example):** `32753MO0980022`, MO · ZIP `63101` · FIPS `29510` · plan year 2026. Always quote current inventory and confirm `api_enrollment: true`.
+- **Required attestations:** Fetch `enrollment_requirements` for the selected plan. Broker-assisted test flows include `consumer_working_with_agent: true`.
+- **Primary applicant:** Include `marital_status` and `currently_incarcerated`. Citizenship and incarceration answers can make the applicant ineligible.
+- **Carrier producer code:** Broker-assisted enrollments include `agent_of_record.carrier_producer_code`. For Anthem and Wellpoint, this is the carrier-issued encrypted agent TIN, not an agency identifier. It must contain exactly 10 uppercase letters and end in `Y` or `Z`.
+- **SSN:** The example uses the designated fake SSN `317201410` (`317-20-1410`). Use it only in staging.
+- **SEP documentation:** Required for the illustrated Missouri flow. Other carrier and state combinations may differ; follow the create response.
+- **Payment:** When `payment_instructions.payment_required_with_submission` is `true`, send an ACH bank account through `PUT /payment_method` before submit.
+- **State supplements:** Render and send every state supplement returned in `enrollment_requirements`. For example, Colorado can require primary and disclosures signatures.
+- **Anthem electronic communications:** When plan requirements return `communication_preferences.email_contact_consent`, display the returned carrier content and send the consumer's explicit boolean answer. Both Yes and No are valid.
+- **Wellpoint Texas accessible materials:** When plan requirements return the primary communication-impairment questions, send the explicit Yes or No answer and any required format fields. Braille uses `communication_impairment_format: "braille"`.
+
+> **Staging test data only.** The SSN below is the designated fake value. The payment example uses the personal savings fixture provided for Elevance staging and verified with HealthKeepers Virginia on July 27, 2026 and Wellpoint Texas on July 29, 2026. Never use these values in production.
+
+```json
+{
+  "external_id": "your-tracking-id-001",
+  "plan_hios_id": "32753MO0980022",
+  "plan_year": 2026,
+  "residential_address": {
+    "street_address_1": "123 Main St",
+    "city": "St. Louis",
+    "state": "MO",
+    "zip_code": "63101",
+    "fips_code": "29510"
+  },
+  "applicants": {
+    "primary": {
+      "external_id": "member-001",
+      "first_name": "Jane",
+      "last_name": "Doe",
+      "date_of_birth": "1990-05-15",
+      "gender": "female",
+      "marital_status": "single",
+      "currently_incarcerated": false,
+      "email": "jane.doe@example.com",
+      "phone": "5555550100",
+      "phone_type": "cell",
+      "ssn": "317201410",
+      "us_citizen": true,
+      "resides_in_state": true,
+      "uses_tobacco": false,
+      "race_ethnicity": "decline_to_answer",
+      "hispanic_origin": "decline_to_answer",
+      "language_spoken": "english",
+      "language_written": "english",
+      "signature": "Jane Doe"
+    }
+  },
+  "agent_of_record": {
+    "first_name": "Pat",
+    "last_name": "Broker",
+    "national_producer_number": "98765432",
+    "carrier_producer_code": "KJNNKJSJUY",
+    "email": "agent@example.com",
+    "phone": "5555550101"
+  },
+  "hra": {
+    "offered_hra": true,
+    "type": "ichra",
+    "amount": 500,
+    "contribution_covers": "premium",
+    "start": "2026-01-01",
+    "employer": {
+      "name": "Acme Corp",
+      "fein": "123456789",
+      "phone": "5555550102",
+      "address": {
+        "street_address_1": "789 Corporate Blvd",
+        "city": "St. Louis",
+        "state": "MO",
+        "zip_code": "63101"
+      }
+    }
+  },
+  "special_enrollment_period": {
+    "event_type": "offered_ichra",
+    "event_date": "2026-07-08"
+  },
+  "attestations": {
+    "electronic_signature_consent": true,
+    "agrees_issuer_attestations": true,
+    "broker_signature_attestation": true,
+    "agent_advised_consumer_of_product_features": true,
+    "consumer_working_with_agent": true
+  },
+  "signatures": {
+    "signature_date": "2026-07-18"
+  }
+}
+```
+
+For Anthem, add the electronic communications answer when returned by plan requirements:
+
+```json
+{
+  "communication_preferences": {
+    "email_contact_consent": false
+  }
+}
+```
+
+For Wellpoint Texas, merge the accessible-materials fields into `applicants.primary`. If the Texas HMO consumer-choice disclosure is returned, also accept it under `attestations`:
+
+```json
+{
+  "applicants": {
+    "primary": {
+      "has_communication_impairment": true,
+      "communication_impairment_format": "braille"
+    }
+  },
+  "attestations": {
+    "disclosure_statement_accepted": true
+  }
+}
+```
+
+When `has_communication_impairment` is false, omit both format fields. When the format is `other`, also send `communication_impairment_format_other` with `encrypted_audio_cd` or `encrypted_data_cd`.
+
+After create:
+
+1. Save `application_id`.
+2. Check `errors` for supporting documents and upload them when required.
+3. Check `payment_instructions.payment_required_with_submission`.
+4. Require the `next_actions` entry with `rel: "payment_method"`. Its method must be `PUT`, and its relative `href` must match the current application. If it is absent or invalid, stop and contact HealthSherpa.
+5. Build the request at runtime from the consumer's billing and bank details. The JSON below is a staging fixture, not a production request template.
+6. Send the request through the PCI-compliant proxy URL provided by HealthSherpa.
+7. Call `/submit` only after the payment method response is `200 OK`.
+8. After submit returns 202, poll the application with backoff and continue through `sep_docs_under_review` and `pending_effectuation`, because both are intermediate states. Stop on lifecycle terminal states `effectuated`, `cancelled`, or `terminated`. Stop the current polling attempt at `submission_failed`, then remediate and resubmit. Treat `effectuated` as immediate success. Treat `draft` as transient for up to one hour; after that, alert and reconcile instead of resubmitting automatically.
+9. If submission fails, read `errors`, correct the application or payment data, and resubmit.
+
+```json
+{
+  "payment_method_type": "bank_account",
+  "first_name": "Test",
+  "last_name": "Applicant",
+  "address": {
+    "street_address_1": "123 Main St",
+    "street_address_2": "",
+    "city": "St. Louis",
+    "state": "MO",
+    "zip_code": "63101"
+  },
+  "eft_routing": "071205850",
+  "eft_number": "23487289374982",
+  "eft_type": "savings",
+  "eft_level": "personal",
+  "bank_name": "Test Bank",
+  "payment_type": "both",
+  "withdraw_day": 12
+}
+```
+
+`PERSONALSAVINGS` maps to `eft_type: "savings"` and `eft_level: "personal"`. Synthetic account-holder names are accepted for this staging fixture, but the API requires both `first_name` and `last_name`.
+
+Use `payment_type: "initial"` for the first payment only. Use `"both"` for the first payment and recurring monthly premiums. The endpoint enum also defines `"recurring"`, but Anthem and Wellpoint do not currently support it without an initial payment. `withdraw_day` accepts 1 through 28 and defaults to `1` when omitted. HealthSherpa transmits this selection to the carrier, and the carrier initiates the debits. Verified Anthem Virginia and Wellpoint Texas flows returned `200` from `/payment_method`, `202` from `/submit`, and remained `pending_effectuation` without carrier errors through 90 seconds of polling. This is not final payment or effectuation confirmation. See [payment-and-documents.md](payment-and-documents.md) for transport and response details.
 
 ### Oscar
 
@@ -1282,7 +1443,7 @@ Add dependents under `applicants.dependents` (an array). Each dependent needs `r
 - A typed `signature` on each adult dependent (spouse or domestic partner); children do not sign.
 - `ssn` only when the carrier requires it (see each carrier above); dependents may otherwise omit it.
 
-The household HRA answer is carried by the top-level `hra` object — do not repeat it per applicant. The example below (primary + spouse + child) was verified end-to-end.
+Always include the top-level `hra` object with employer details. When plan requirements return `hra.per_applicant_hra: true`, also send `hra` under the primary and every non-child dependent relationship supported by the selected carrier, using the returned `contribution_covers` values. Do not send per-applicant HRA answers for children. Otherwise, do not duplicate the household HRA answer per applicant. The example below (primary + spouse + child) was verified end-to-end for a carrier that does not require per-applicant HRA answers.
 
 ```json
 {
@@ -1335,6 +1496,13 @@ Some states require an additional **state-supplement signature** alongside the p
 | Colorado (CO) | `state_supplement_primary_signature`, `state_supplement_disclosures_signature` |
 | Utah (UT) | `state_supplement_primary_signature`, `state_supplement_spouse_signature` (spouse only when a spouse is on the application) |
 
+Texas HMO plans can return
+`enrollment_requirements.attestations.tx_hmo_consumer_choice_disclosure`.
+Display its `content`. When
+`content_data.disclosure_statement_checkbox_label` is present, render that
+checkbox and send `attestations.disclosure_statement_accepted: true`. Do not
+require acceptance when the disclosure does not include a checkbox label.
+
 Example (`signatures` block for a NJ enrollment):
 
 ```json
@@ -1354,13 +1522,15 @@ Example (`signatures` block for a NJ enrollment):
 |---|---|---|
 | `applicants.primary.signature` / `signatures.signature_date` | Signature split not honored | Send both — typed name on the applicant, date in `signatures` |
 | `agrees_issuer_attestations` / `electronic_signature_consent` | Required attestation omitted | Include all attestations listed for that carrier |
-| `hra` | HRA answer missing | Include the top-level `hra` block — it covers every adult on the application; do not repeat it per applicant |
+| `hra` | HRA answer missing | Include the top-level `hra` block. If plan requirements return `hra.per_applicant_hra: true`, also send HRA answers for the primary and every non-child dependent, plus any conditionally required top-level QSEHRA household follow-up |
 | `applicants[n].has_disability` / `full_time_student` / `signature` | Required dependent fields omitted | Send `has_disability` and `full_time_student` on every dependent, and a `signature` on adult dependents |
 | `ssn` (`invalid_field_value` on submit) | Carrier requires the primary's SSN | Include a valid `ssn` for carriers marked **SSN: Required** |
 | `supporting_documentation_required` | Carrier requires SEP proof (e.g., BCBS AZ) | Upload via `/supporting_documentation` then submit |
+| Proof of residency required | Plan requirements return `proof_of_residency_required: true` | Display `proof_of_residency_text` and upload with `document_type: "proof_of_residency"` before submit |
+| `payment_method` (`missing_required_field`) | `payment_required_with_submission` is true and no payment method has been saved | Use the `payment_method` next action to send ACH through the HealthSherpa-provided PCI proxy, require 200 OK, then submit |
 | `Invalid dental selection` | Qualified-dental carrier (HCSC) got both `dental_plan_hios_id` and `attestations.pediatric_dental`, or neither | Send exactly one. On update, `null` the field you are clearing |
 | `No plan found for dental_plan_hios_id: <id>` / `dental_plan_hios_id has a carrier mismatch` | Dental plan is a different carrier than the medical plan, or not eligible/in service area | Discover dental with a ZIP/FIPS-scoped dental quote (`POST /quotes` with `dental_search: true` and the member's `zip_code`/`fip_code`/`state`) so results are service-area accurate, and pick a plan whose **issuer matches the medical plan's issuer** — HCSC's "BlueCare Dental" shares the medical issuer prefix (e.g. `36096`). The `GET /plans?...&dental_only=true` list is state-level and not service-area filtered, so confirm service area with the dental quote before enrolling. A different-carrier or out-of-area dental plan is rejected |
 | `not eligible for API enrollment` | Plan's `api_enrollment` is false for that carrier/state | Re-quote; route to Deeplink when `api_enrollment:false` |
-| SEP date outside window | `event_date` too old/new for the SEP reason | Use a date within the carrier's window (typically 60 days before/after) |
+| SEP date outside window | `event_date` is too far in the past or future | Use the selected reason's `event_date_days_before` and `event_date_days_after` offsets relative to today |
 
-_Generated from HealthSherpa staging `enrollment_requirements` and verified end-to-end. Plan IDs are 2026 examples — always quote for current inventory._
+_Generated from HealthSherpa staging `enrollment_requirements` and validated against staging application flows. Plan IDs are 2026 examples; always quote for current inventory and poll asynchronous submission status._
