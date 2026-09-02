@@ -76,11 +76,16 @@ The Policy Status webhook (`event_type: "sync"`) delivers the lifecycle `policy_
 
 The following `policy_status` values are not delivered by the Policy Status webhook — you observe them on the application record via `GET /api/v1/applications/:id` during the create / submit / document flow:
 
+Use `sep_docs_*` rows only when those values are returned as `policy_status`
+for a currently SEP-suspended application. For other document workflows,
+monitor `document_status` instead.
+
 | `policy_status` | Action |
 |---|---|
 | `submission_failed` | Carrier submission failed. Check `errors`. Alert for manual review or retry. |
 | `sep_docs_required` | SEP documentation needed. Prompt user to upload via `/supporting_documentation`. |
-| `sep_docs_under_review` | Docs uploaded, carrier reviewing. No action needed — wait for next transition. |
+| `sep_docs_under_review` | Docs uploaded and under review. Continue bounded polling; alert when review exceeds the integration's documented service threshold. |
+| `sep_docs_denied` | Submitted proof was denied. Stop passive polling. Use returned actions or errors when present; otherwise prompt for corrected documentation or escalate manually. |
 
 ## Polling Fallback
 
@@ -100,6 +105,10 @@ GET /api/v1/applications?updated_since=2026-07-01T00:00:00Z
 
 Carrier processing is asynchronous. Applications may stay in `pending_effectuation` for minutes to hours depending on the carrier. Do not treat slow transitions as errors.
 
+Define a separate stale-review threshold for `sep_docs_under_review` based on
+the supported carrier process. Polling must produce an alert when that boundary
+is exceeded rather than continue indefinitely.
+
 ## Reconciliation
 
 | Cadence | Action |
@@ -113,6 +122,7 @@ Carrier processing is asynchronous. Applications may stay in `pending_effectuati
 Set up alerts for:
 
 - `pending_effectuation` status persisting > 48 hours
+- `sep_docs_under_review` persisting beyond the configured review threshold
 - Webhook endpoint returning non-2xx for > 15 minutes
 - Spike in 422 errors on create/submit (may indicate payload issues or carrier-side changes)
 - Increasing 429 rate limit responses (may need rate limit upgrade)

@@ -13,20 +13,20 @@ _Reference examples for building successful off-exchange ICHRA enrollments throu
 - **Auth:** send `x-api-key: <your key>` and `Content-Type: application/json` on every request.
 - **Quote first.** The plan IDs, ZIP, and FIPS below are illustrative 2026 examples. In production, call `POST /api/v1/quotes` (with `off_ex: true`) to get a current `plan_hios_id` for the member's county, and confirm `api_enrollment: true` on the plan before creating an application.
 - **Fetch requirements.** Call `GET /api/v1/plans/{hios_id}?plan_year=2026&include=enrollment_requirements` to get the carrier's exact attestation text and SEP rules. Render the returned legal text to the consumer — do not use generic labels.
-- **`external_id` is not de-duplicated.** Submitting two creates with the same `external_id` produces two separate applications. Store the `application_id` returned by create and use it for every follow-up call; look up by `external_id` before retrying a create.
+- **`external_id` is not de-duplicated.** Submitting two creates with the same `external_id` produces two separate applications. Store the `application_id` returned by create and use it for every follow-up call. After an ambiguous create response, retry only when transport-level evidence proves the request was never sent; otherwise use bounded reconciliation and manual intervention.
 - **Use real, current dates.** For the selected SEP reason, the event date may be up to `event_date_days_before` days before today or `event_date_days_after` days after today. The dates in these examples are illustrative — replace them with the member's actual event and signature dates.
 
 ## Conventions used in every example (best practices)
 
 - **Enums are lowercase snake_case**; dates are ISO 8601 (`YYYY-MM-DD`); money is a string (`"50.50"`).
-- **Field names:** `street_address_1`/`street_address_2` (not `street_line_*`), `gender` (not `sex`), `uses_tobacco` (not `tobacco_use`).
+- **Field names:** `street_address_1`/`street_address_2` (not `street_line_*`), applicant `gender` (not `sex`), and `uses_tobacco` (not `tobacco_use`). The `responsible_party` sub-object is the exception and uses `sex`.
 - **Signatures are split** — `applicants.primary.signature` (typed legal name) **and** `signatures.signature_date`. Both are required to submit.
 - **Always include `hra`** with employer `name`, `fein`, and nested `address`, plus an `agent_of_record` (`first_name`, `last_name`, `national_producer_number`).
 - **SEP:** these examples use `event_type: "offered_ichra"` (the ICHRA offer), the canonical reason for ICHRA enrollment. Send the canonical value; HealthSherpa maps it to the carrier's format.
 - **`desired_effective_date` is omitted** so the carrier auto-determines the effective date (recommended).
 - **`external_id` is optional and appears in two places** — at the top level (your application tracking id) and on each applicant (your member/person id). Both are correlation metadata echoed back on reads; neither is used to match or de-duplicate records. Use them to map HealthSherpa applications and members back to your own system.
 - **SSN is carrier-specific.** Some carriers require the primary's SSN to submit; others do not. Each carrier section below states which. When required, send a valid SSN (or ITIN where the carrier accepts one).
-- **These payloads carry PII/PHI.** SSN, DOB, signatures, addresses, and the other identity fields below are sensitive data — securing, storing, and redacting them in your own systems is your responsibility, not HealthSherpa's. See **Security & Credentials → PII / PHI** in `SKILL.md`.
+- **These payloads carry PII/PHI.** SSN, DOB, signatures, addresses, and the other identity fields below are sensitive data — securing, storing, and redacting them in your own systems is your responsibility, not HealthSherpa's. See **Security & Credentials** in `SKILL.md`.
 
 ## Quote for a current plan
 
@@ -165,6 +165,243 @@ All carriers below are `api_enrollment: true`. Every section provides a complete
 ```
 
 > After create, run **step 2 (upload SEP documentation)** above, then **step 3 (submit)**.
+
+### Blue Cross Blue Shield of Michigan and Blue Care Network
+
+> **Plan year 2026 individual medical plans only.** Quote current inventory. Example HIOS IDs are not stable across plan years.
+
+- **Issuer identification:** `15560` is Blue Cross Blue Shield of Michigan PPO. `98185` is Blue Care Network HMO.
+- **Example plan:** `15560MI0350010`, BCBSM PPO, ZIP `48201`, FIPS `26163`, plan year 2026.
+- **Applicant identity:** Every applicant needs either `ssn` or `itin`.
+- **Required applicant answers:** Every applicant needs `race_ethnicity`, `us_citizen`, `resides_in_state`, and `uses_tobacco`. The primary also needs `phone_type` with `home`, `cell`, or `work`.
+- **Relationships:** Use the selected plan's returned options. BCBSM and BCN medical plans accept `spouse` and `child`; `domestic_partner` is rejected.
+- **SEP documentation:** Required for every SEP type returned by the selected medical plan. Upload before submit.
+- **HSA plan:** When plan requirements return an `agrees_hsa_contact_opt_in` object, display its exact `content` and option labels and follow its `required` value. BCBSM's content asks whether the consumer wants to enroll in a HealthEquity HSA. Send an answered boolean at `communication_preferences.agrees_hsa_contact_opt_in`.
+- **Payment:** Submit first, then offer payment redirect and pay by phone. Always follow `payment_instructions`.
+- **Lifecycle:** Under the 2026 contract, BCBSM and BCN do not return post-submit update, cancel, or terminate actions. Always follow the current response.
+- **Dental boundary:** This section is for Michigan medical plans. Do not apply HCSC qualified-dental rules.
+
+```json
+{
+  "external_id": "your-tracking-id-001",
+  "plan_hios_id": "15560MI0350010",
+  "plan_year": 2026,
+  "residential_address": {
+    "street_address_1": "123 Main St",
+    "city": "Detroit",
+    "state": "MI",
+    "zip_code": "48201",
+    "fips_code": "26163"
+  },
+  "applicants": {
+    "primary": {
+      "external_id": "member-001",
+      "first_name": "Jane",
+      "last_name": "Doe",
+      "date_of_birth": "1990-05-15",
+      "gender": "female",
+      "ssn": "317201410",
+      "email": "jane.doe@example.com",
+      "phone": "3135550100",
+      "phone_type": "cell",
+      "us_citizen": true,
+      "resides_in_state": true,
+      "uses_tobacco": false,
+      "race_ethnicity": "white",
+      "signature": "Jane Doe"
+    },
+    "dependents": [
+      {
+        "external_id": "member-002",
+        "relationship": "spouse",
+        "first_name": "Alex",
+        "last_name": "Doe",
+        "date_of_birth": "1991-07-22",
+        "gender": "male",
+        "itin": "900701234",
+        "us_citizen": true,
+        "resides_in_state": true,
+        "uses_tobacco": false,
+        "race_ethnicity": "white",
+        "signature": "Alex Doe"
+      }
+    ]
+  },
+  "agent_of_record": {
+    "first_name": "Pat",
+    "last_name": "Broker",
+    "national_producer_number": "98765432",
+    "email": "agent@example.com",
+    "phone": "3135550101"
+  },
+  "hra": {
+    "offered_hra": true,
+    "type": "ichra",
+    "amount": 500,
+    "contribution_covers": "premium",
+    "start": "2026-09-01",
+    "employer": {
+      "name": "Acme Corp",
+      "fein": "123456789",
+      "phone": "3135550102",
+      "address": {
+        "street_address_1": "789 Corporate Blvd",
+        "city": "Detroit",
+        "state": "MI",
+        "zip_code": "48201"
+      }
+    }
+  },
+  "special_enrollment_period": {
+    "event_type": "offered_ichra",
+    "event_date": "2026-08-15"
+  },
+  "attestations": {
+    "electronic_signature_consent": true,
+    "agrees_issuer_attestations": true,
+    "broker_signature_attestation": true,
+    "agent_advised_consumer_of_product_features": true
+  },
+  "signatures": {
+    "signature_date": "2026-08-31"
+  }
+}
+```
+
+When BCBSM or BCN plan requirements return the HSA question, add the explicit answer:
+
+```json
+{
+  "communication_preferences": {
+    "agrees_hsa_contact_opt_in": false
+  }
+}
+```
+
+Both `true` and `false` are valid. False declines the carrier-defined HSA action but does not block enrollment in the HSA-eligible health plan. When `required` is true, omission or null leaves the draft incomplete; block submit until the answer is corrected. When `required` is false, the answer is optional. If the requirement or its parent is absent or null, omit the field and do not show the question.
+
+Create returns `201` even when its `errors` array contains blocking items. For the illustrated SEP, upload `document_type: "sep"` before submit. A valid submit returns `202`; follow the tracking rules above through intermediate `draft` and `pending_effectuation` states until a lifecycle terminal state or monitoring boundary.
+
+After create, store each returned applicant `member_id`. It is an opaque HealthSherpa identifier. On a full draft PUT, return the exact ID with the matching applicant; do not derive it, use `external_id` for matching, or assign it by array position.
+
+BCBSM and BCN support post-submit payment redirect and pay by phone, with no payment method required before submission. The redirect is an HTTPS `POST` with opaque SAML form data. HTML-escape each field while preserving its decoded form value, and do not inspect or log those values. When change capabilities are false, do not update or change plans. Call cancel or terminate only when its matching `next_actions` entry is present. Otherwise direct the member to the carrier.
+
+### AmeriHealth Caritas Next
+
+- **Plan (example):** `72760DE0010001`, Delaware HMO, ZIP `19801`, FIPS `10003`, plan year 2026.
+- **Issuer IDs:** `72760` in Delaware, `67926` in Florida, `38246` in Louisiana, `17414` in North Carolina, and `73107` in South Carolina.
+- **Brand:** South Carolina plans are presented as First Choice Next.
+- **Identity:** Under the 2026 application contract, SSN is required for each applicant age one or older on the request date. An applicant younger than one may omit it. The example uses the HC.gov test SSN `317201410`; use it only in a sandbox.
+- **Primary applicant:** The 2026 fields include `marital_status`, `language_spoken`, and `language_written`. Follow returned options; accepted marital statuses are `married`, `unmarried`, `divorced`, and `widowed`. Gender also accepts `x`. Use `cell` or `work` for `phone_type`.
+- **Eligibility:** Send explicit `us_citizen` and `resides_in_state` answers. False makes the applicant ineligible.
+- **Relationships:** Use the returned options. The 2026 medical values are `spouse` and `child`.
+- **Responsible party:** For a child-only application, render the returned question. When the consumer identifies another person as responsible for payment, send the object using its returned conditional fields; otherwise omit it.
+- **SEP documentation:** Follow each returned event's `documentation_required` value. The 2026 events require SEP proof.
+- **SEP suspension:** For `sep_docs_required`, prompt for upload. For `sep_docs_under_review`, use bounded monitoring and alert if review becomes stale. For `sep_docs_denied`, stop passive polling and prompt for corrected documents or escalation. None of these statuses means coverage is effectuated.
+- **HSA question:** Follow `enrollment_requirements`. For 2026 AmeriHealth Caritas Next plans, `agrees_hsa_contact_opt_in` is absent even when `hsa_eligible` is true, so do not render or send it.
+- **State content:** Display the returned Louisiana out-of-network disclosure. For broker-assisted North Carolina applications, display and collect the returned NC licensed-agent attestation.
+- **Dental boundary:** Do not apply HCSC qualified-dental rules. Follow the returned pediatric-dental requirement.
+
+```json
+{
+  "external_id": "your-tracking-id-001",
+  "plan_hios_id": "72760DE0010001",
+  "plan_year": 2026,
+  "residential_address": {
+    "street_address_1": "123 Main St",
+    "city": "Wilmington",
+    "state": "DE",
+    "zip_code": "19801",
+    "fips_code": "10003"
+  },
+  "applicants": {
+    "primary": {
+      "external_id": "member-001",
+      "first_name": "Jane",
+      "last_name": "Doe",
+      "date_of_birth": "1990-05-15",
+      "gender": "female",
+      "ssn": "317201410",
+      "email": "jane.doe@example.com",
+      "phone": "3025550100",
+      "phone_type": "cell",
+      "marital_status": "unmarried",
+      "language_spoken": "english",
+      "language_written": "english",
+      "us_citizen": true,
+      "resides_in_state": true,
+      "uses_tobacco": false,
+      "signature": "Jane Doe"
+    }
+  },
+  "agent_of_record": {
+    "first_name": "Pat",
+    "last_name": "Broker",
+    "national_producer_number": "<agent-npn>",
+    "email": "agent@example.com",
+    "phone": "3025550101"
+  },
+  "hra": {
+    "offered_hra": true,
+    "type": "ichra",
+    "amount": 500,
+    "contribution_covers": "premium",
+    "start": "2026-09-01",
+    "employer": {
+      "name": "Acme Corp",
+      "fein": "<employer-fein>",
+      "phone": "3025550102",
+      "address": {
+        "street_address_1": "789 Corporate Blvd",
+        "city": "Wilmington",
+        "state": "DE",
+        "zip_code": "19801"
+      }
+    }
+  },
+  "special_enrollment_period": {
+    "event_type": "offered_ichra",
+    "event_date": "2026-08-15"
+  },
+  "attestations": {
+    "electronic_signature_consent": true,
+    "agrees_issuer_attestations": true,
+    "broker_signature_attestation": true,
+    "agent_advised_consumer_of_product_features": true
+  },
+  "signatures": {
+    "signature_date": "2026-08-31"
+  }
+}
+```
+
+Upload SEP proof with `document_type: "sep"` when the selected event returns `documentation_required: true`. A successful submit can move the application to `sep_docs_under_review`. After verification, continue monitoring until the policy reaches its later lifecycle status.
+
+For a child-only application where the consumer identifies another person as responsible for payment, merge a responsible-party object into the primary applicant:
+
+```json
+{
+  "applicants": {
+    "primary": {
+      "responsible_party": {
+        "first_name": "Alex",
+        "last_name": "Doe",
+        "relationship": "parent",
+        "phone": "3025550103",
+        "email": "alex.doe@example.com",
+        "street_address_1": "123 Main St",
+        "city": "Wilmington",
+        "state": "DE",
+        "zip_code": "19801"
+      }
+    }
+  }
+}
+```
+
+Use the `question`, `instruction`, relationship options, and field conditions returned by plan requirements. Omit `responsible_party` when the section does not apply.
+
+For a minor primary applicant, include the guardian fields and set `applicants.primary.signature` to the guardian's exact full name. Do not sign with the minor's name.
 
 ### UnitedHealthcare
 

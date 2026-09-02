@@ -132,14 +132,14 @@ Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_lin
 | `first_name`, `last_name` | string | Required |
 | `middle_name`, `suffix` | string | Optional |
 | `date_of_birth` | date | Required. ISO 8601. |
-| `gender` | enum | Required. `male`, `female`. NOT `sex`. |
-| `ssn` | string | 9 digits, no dashes. Masked in responses. |
-| `itin` | string | Individual Taxpayer ID (alternative to SSN) |
+| `gender` | enum | Required. Common values are `male` and `female`; the 2026 AmeriHealth Caritas Next contract also accepts `x`. NOT `sex`. |
+| `ssn` | string | 9 digits, no dashes. Masked in responses. BCBS Michigan requires either SSN or ITIN for every applicant. For AmeriHealth Caritas Next, SSN is required when the applicant is age one or older on the request date. |
+| `itin` | string | Individual Taxpayer ID (alternative to SSN). BCBS Michigan accepts it in place of SSN. |
 | `uses_tobacco` | boolean | NOT `tobacco_use` |
 | `us_citizen` | boolean | |
 | `resides_in_state` | boolean | |
 | `currently_incarcerated` | boolean | Carrier-specific. Include for Anthem and Wellpoint. |
-| `marital_status` | enum | Carrier-specific. `single`, `married`, `domestic_partner`; Anthem and Wellpoint accept all three. |
+| `marital_status` | enum | Carrier-specific. Anthem and Wellpoint use `single`, `married`, and `domestic_partner`. The 2026 AmeriHealth Caritas Next values are `married`, `unmarried`, `divorced`, and `widowed`. |
 | `race_ethnicity` | enum | `white`, `black_or_african_american`, `asian_indian`, `chinese`, `filipino`, `japanese`, `korean`, `vietnamese`, `native_hawaiian`, `guamanian_or_chamorro`, `samoan`, `american_indian_or_alaskan_native`, `decline_to_answer` |
 | `hispanic_origin` | enum | `yes`, `no`, `decline_to_answer` |
 | `hispanic_origin_description` | enum | Only when `hispanic_origin: "yes"`. Values: `cuban`, `mexican_mexican_american_or_chicanx`, `puerto_rican`, `other_hispanic_latino_or_spanish_origin`, `decline_to_answer` |
@@ -154,13 +154,13 @@ Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_lin
 | `external_id` | string | Optional. Unique within application. |
 | `email` | string | |
 | `phone` | string | |
-| `phone_type` | enum | `cell`, `home`, `work` |
-| `language_spoken`, `language_written` | enum | `english`, `spanish`, `arabic`, `chinese`, `french_creole`, `french`, `german`, `gujarati`, `hindi`, `korean`, `polish`, `portuguese`, `russian`, `tagalog`, `urdu`, `vietnamese`, `other` |
+| `phone_type` | enum | `cell`, `home`, `work`. The 2026 AmeriHealth Caritas Next values are `cell` and `work`; `cell` maps to the carrier's Personal option. |
+| `language_spoken`, `language_written` | enum | `english`, `spanish`, `arabic`, `chinese`, `french_creole`, `french`, `german`, `gujarati`, `hindi`, `korean`, `polish`, `portuguese`, `russian`, `tagalog`, `urdu`, `vietnamese`, `other`. Both fields are required for the 2026 AmeriHealth Caritas Next primary applicant. |
 | `has_communication_impairment` | boolean | Required when returned in `enrollment_requirements.applicants.primary`. Both `true` and `false` are valid answers. |
 | `communication_impairment_format` | enum | Required when `has_communication_impairment` is true. `braille`, `large_print`, `audio`, `other`. |
 | `communication_impairment_format_other` | enum | Required when format is `other`. `encrypted_audio_cd`, `encrypted_data_cd`. |
 | `guardian` | object | See Guardian |
-| `responsible_party` | object | See EnrollConnect YML spec for full fields |
+| `responsible_party` | object | See Responsible Party Sub-Object below. |
 | `translator` | object | `{first_name, middle_name, last_name, reason}` |
 | `children_live_with_primary` | boolean | |
 | `has_pediatric_dental_coverage` | boolean | |
@@ -172,7 +172,7 @@ Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_lin
 
 | Field | Type | Notes |
 |---|---|---|
-| `relationship` | enum | Required. Universally accepted: `spouse`, `child`, `domestic_partner`. `parent`/`stepparent` and `parent_in_law`/`other` are accepted only for specific carrier/state combinations, not across the board. |
+| `relationship` | enum | Required. Use the options returned for the selected plan. BCBS Michigan and 2026 AmeriHealth Caritas Next medical plans accept `spouse` and `child`. Other values are carrier- and state-specific. |
 
 ### Applicant Matching on PUT
 
@@ -180,6 +180,9 @@ Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_lin
 - Omit `member_id` on a dependent → creates new dependent
 - Omit existing dependent from array → removes them
 - `external_id` is metadata only — never used for matching
+- Treat `member_id` as opaque and match it to your own applicant record. Never construct it or assign IDs by dependent array position.
+
+For a submitted application whose carrier supports changes, preserve all identity fields in the full PUT. Changing both first and last name together is rejected. Changing date of birth together with a name is also rejected. Make one supported identity correction at a time.
 
 ### Guardian Sub-Object
 
@@ -203,6 +206,97 @@ Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_lin
   }
 }
 ```
+
+For a primary applicant under 18, include the required guardian identity and
+contact fields. Set `applicants.primary.signature` to the guardian's exact full
+name; a different name is rejected. Application reads return the accepted
+value under `applicants.primary.guardian.signature`.
+
+### Responsible Party Sub-Object
+
+Plan requirements can return
+`applicants.primary.responsible_party` with the section `question`,
+`instruction`, relationship options, and field-level requiredness. An
+`applies: true` value means the carrier supports the section; use its question
+and conditional rules to determine whether the consumer must complete it. A
+requirements response can use this shape:
+
+```json
+{
+  "responsible_party": {
+    "applies": true,
+    "question": "Is someone else responsible for payment?",
+    "instruction": "Carrier-defined responsible-party instruction.",
+    "uses_minor_dependent_enrollment_gate": false,
+    "relationship": {
+      "required_when_section_applies": true,
+      "options": [
+        {"value": "parent", "label": "Parent"},
+        {"value": "grandparent", "label": "Grandparent"},
+        {"value": "legal_guardian", "label": "Legal guardian"},
+        {"value": "other", "label": "Other"}
+      ]
+    },
+    "email": {"required_when_section_applies": false},
+    "applicant_can_release_dependent_info": {
+      "required_when_section_applies": false
+    },
+    "dependent_same_address": {
+      "required_when_section_applies": false
+    },
+    "dependent_address": {
+      "required_when_dependent_same_address_false": false
+    }
+  }
+}
+```
+
+Display the exact returned question, `instruction`, labels, options, and
+conditions. When the consumer identifies another person as responsible for
+payment, send the object under `applicants.primary`. Applicant identity uses
+`gender`; this sub-object uses `sex`.
+
+```json
+{
+  "responsible_party": {
+    "first_name": "Alex",
+    "middle_name": "J",
+    "last_name": "Doe",
+    "sex": "female",
+    "date_of_birth": "1985-02-10",
+    "relationship": "parent",
+    "phone": "3025550103",
+    "email": "alex.doe@example.com",
+    "street_address_1": "123 Main St",
+    "street_address_2": "",
+    "city": "Wilmington",
+    "state": "DE",
+    "zip_code": "19801"
+  }
+}
+```
+
+The flat address fields belong to the responsible party. Apply requirement
+conditions as follows:
+
+- When `uses_minor_dependent_enrollment_gate` is true, collect
+  `enrollment_includes_minor_or_dependent`. If the consumer answers false,
+  omit the remaining responsible-party fields.
+- Once the section applies, require each field whose
+  `required_when_section_applies` value is true.
+- Send `dependent_same_address` when that field is required. If the answer is
+  false and `required_when_dependent_same_address_false` is true, send the
+  dependent's address under the nested `dependent_address` object.
+- If the `uses_minor_dependent_enrollment_gate` configuration value is false,
+  omit only `enrollment_includes_minor_or_dependent`. Use the returned question
+  and household context to decide whether to send the remaining
+  `responsible_party` fields.
+
+For 2026 AmeriHealth Caritas Next plans, this section applies to child-only
+applications when someone other than the application contact is responsible
+for payment. If no additional responsible party applies, omit
+`applicants.primary.responsible_party`. Do not place HRA employer information
+in this object.
 
 ## Agent of Record
 
@@ -274,6 +368,8 @@ children. Use the returned
 QSEHRA household condition applies, send the answer at top-level
 `qsehra_both_employers_claim_reimbursement`.
 
+BCBS Michigan medical requires at least the top-level `hra.offered_hra` answer and supports complete ICHRA and QSEHRA blocks, including employer data.
+
 ## Special Enrollment Period
 
 ```json
@@ -320,6 +416,11 @@ returned `required` flag is false.
 
 For carriers that offer qualified dental (currently HCSC), `attestations.pediatric_dental` is the **attestation** path for satisfying the ACA pediatric dental requirement. The alternative is buying a stand-alone dental plan via the top-level `dental_plan_hios_id`. Send exactly one of the two — both, or neither, returns a `422` (`Invalid dental selection`). See "Qualified Dental (HCSC)" in SKILL.md.
 
+Create and detail responses echo the saved path at
+`response.application.dental_plan_hios_id` and
+`response.application.pediatric_dental`. Use those fields to confirm which
+qualified-dental path was saved.
+
 ## Signatures
 
 ```json
@@ -354,7 +455,7 @@ State supplements by state: CO (`primary`, `disclosures`), UT (`primary`, `spous
     "marketing_contact_consent": false,
     "decline_marketing_contact": false,
     "preferred_communication_method": "email",
-    "agrees_hsa_contact_opt_in": false
+    "agrees_hsa_contact_opt_in": true
   }
 }
 ```
@@ -363,6 +464,30 @@ When plan lookup returns
 `enrollment_requirements.communication_preferences.email_contact_consent.required: true`,
 display the returned question and content, then send an explicit boolean at
 `communication_preferences.email_contact_consent`. A false answer is valid and must not be treated as missing.
+
+When plan lookup returns
+`enrollment_requirements.communication_preferences.agrees_hsa_contact_opt_in`,
+display its exact `content` and boolean option labels. The carrier content
+defines whether the answer represents HSA enrollment, account-opening help,
+contact consent, or data-sharing consent. Do not infer the meaning from the API
+field name.
+
+| Requirement state | Form and payload behavior |
+|---|---|
+| Parent or field absent or null | Do not render HSA content or options, and omit the payload field. |
+| Object with `required: false` | Render the returned `content` and option labels as optional. Omission is valid; preserve an answered `true` or `false`. |
+| Object with `required: true` | Require `true` or `false` before submit. Omission or null is invalid. |
+
+Create and full PUT requests send the answer at
+`communication_preferences.agrees_hsa_contact_opt_in`. Both booleans satisfy
+requiredness, and false does not block enrollment in the HSA-eligible health
+plan. Non-boolean values are invalid. When a required answer is missing, block
+submit locally and use the draft's `missing_required_field` error at
+`communication_preferences.agrees_hsa_contact_opt_in` for correction. If a
+submit is attempted anyway, the API returns `422`.
+
+Application reads preserve both boolean values, including an explicit false.
+Do not use the similarly named `hsa_contact_opt_in`.
 
 ## Response-Only Fields
 
@@ -376,11 +501,29 @@ display the returned question and content, then send an explicit boolean at
 | `payment_instructions` | Carrier payment configuration. When `payment_required_with_submission` is `true`, provide the payment method before submit (see [payment-and-documents.md](payment-and-documents.md)). |
 | `payment` | Carrier-reported payment data (may be null for days/weeks) |
 | `errors` | Validation/prerequisite errors — empty array means ready to submit |
-| `next_actions` | HATEOAS links: `[{rel, href, method}]`. Use these to drive UI. Includes `payment_method` when in-flow payment is available and `change_plan` when plan changes are available. |
+| `next_actions` | HATEOAS links: `[{rel, href, method}]`. Use these to drive UI. Includes `payment_method` when in-flow payment is available. |
 | `supports_changes` | Whether the carrier supports post-enrollment changes for this application |
 | `can_change_plan` | Whether a plan change is currently allowed (requires Open Enrollment + carrier support) |
 | `can_report_change` | Whether demographic changes can be submitted |
 | `created_at`, `updated_at`, `submitted_at` | ISO 8601 timestamps |
+
+### Action Validation
+
+For application `HSA000000001`, validate action links before calling them:
+
+| Action | Required `rel` | Method | Exact path |
+|---|---|---|---|
+| Full update | `update` | `PUT` | `/api/v1/applications/HSA000000001` |
+| Submit | `submit` | `POST` | `/api/v1/applications/HSA000000001/submit` |
+| Cancel | `cancel` | `POST` | `/api/v1/applications/HSA000000001/cancel` |
+| Terminate | `terminate` | `POST` | `/api/v1/applications/HSA000000001/terminate` |
+
+Require `supports_changes` and `can_report_change` before a demographic
+update. Require `supports_changes`, `can_change_plan`, and a valid `update`
+action before changing the plan through the full PUT payload. Never construct
+or call an action that is not returned. A submitted update for a carrier with
+`supports_changes: false` returns `422`; direct the member to the carrier
+instead.
 
 ### Payment Method Response
 
@@ -444,10 +587,29 @@ The `GET /applications/:id` response includes an `events` array that provides a 
 | `submission_failed` | Async carrier submission failed. Check `errors` for details. | No (can re-submit after fixing) |
 | `sep_docs_required` | SEP documentation must be uploaded before carrier processes | No |
 | `sep_docs_under_review` | SEP docs uploaded, carrier reviewing | No |
+| `sep_docs_denied` | Carrier denied the submitted SEP proof; use returned actions or errors when present, otherwise escalate manually | No |
 | `pending_effectuation` | Submitted to carrier, awaiting confirmation | No |
 | `effectuated` | Carrier confirmed, coverage active | Yes (but can be cancelled/terminated) |
 | `cancelled` | Policy never took effect (never effectuated), typically non-payment | Yes |
 | `terminated` | Policy was active and later ended | Yes |
+
+The `sep_docs_*` policy statuses are derived only while an application is
+currently SEP-suspended. For other document workflows, use `document_status`
+and do not infer a `sep_docs_*` policy status.
+
+For a response that uses SEP suspension:
+
+- `sep_docs_required`: prompt for the required document and upload it through
+  `POST /applications/:id/supporting_documentation`.
+- `sep_docs_under_review`: continue bounded GET polling or scheduled GET
+  reconciliation. Alert when review exceeds the integration's documented
+  service threshold; policy-status webhooks do not deliver this state.
+- `sep_docs_denied`: stop passive polling and prompt for corrected
+  documentation or manual escalation. Use a supporting-documentation action
+  when one is present.
+
+After document verification, continue monitoring for the later carrier and
+policy status. No `sep_docs_*` state confirms effectuation.
 
 ### Response Normalization
 
@@ -492,9 +654,15 @@ The `GET /applications` (list) and `GET /applications/:id` (detail) responses ha
       "application_id": "HSA000739499",
       "primary_applicant": { "member_id": "HSM001145562", "first_name": "Jane", "last_name": "Doe", ... },
       "external_id": "your-id",
+      "status": "draft",
       "policy_status": "draft",
+      "plan_year": 2026,
+      "plan_hios_id": "13877AZ0070072",
+      "issuer_hios_id": "13877",
+      "policy_effective_date": null,
       "state": "AZ",
-      ...
+      "created_at": "2026-04-28T13:56:56.119Z",
+      "updated_at": "2026-04-28T13:56:56.838Z"
     }
   ],
   "pagination": { "total_count": 61, "limit": 25, "offset": 0 }
@@ -503,3 +671,19 @@ The `GET /applications` (list) and `GET /applications/:id` (detail) responses ha
 - Uses `primary_applicant` (flat) not `applicants.primary` (nested)
 - Uses `pagination.total_count` not `pagination.total`
 - Use `application_id` to link to the detail view
+- `status`, `policy_status`, `plan_year`, `policy_effective_date`,
+  `created_at`, and `updated_at` are separate list-item fields.
+- `plan_hios_id` and `issuer_hios_id` can be null; fetch detail when complete
+  plan data is required.
+
+List filters:
+
+| Parameter | Description |
+|---|---|
+| `policy_status` | Filter by lifecycle status |
+| `external_id` | Filter by the platform's tracking ID |
+| `plan_year` | Filter by plan year |
+| `issuer_hios_id`, `plan_hios_id` | Filter by issuer or plan |
+| `employer_external_id` | Filter by employer |
+| `updated_since` | Return applications updated after an ISO 8601 timestamp |
+| `limit`, `offset` | Paginate results; limit defaults to 25 and has a maximum of 100 |
