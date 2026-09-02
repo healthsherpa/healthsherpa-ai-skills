@@ -3,7 +3,7 @@ name: ichra-platform-integration
 description: Build ICHRA platforms that integrate with HealthSherpa APIs for plan quoting, enrollment, payment, and policy management. Use when building or debugging an ICHRA platform integration, working with HealthSherpa enrollment or quoting APIs, or when the user mentions ICHRA, HRA, enrollment, quoting, plan selection, carrier submission, or policy status.
 metadata:
   author: healthsherpa
-  version: "1.0"
+  version: "1.1"
 ---
 
 # ICHRA Platform Integration with HealthSherpa
@@ -19,55 +19,29 @@ All EnrollConnect and Quoting endpoints use these base URLs. Deeplinks use diffe
 
 ## Authentication
 
-All requests require an `x-api-key` header. API keys are provided during onboarding.
+QuoteConnect, EnrollConnect, and Deeplink requests require an `x-api-key` provided during onboarding.
 
 ```
 x-api-key: your_api_key_here
 Content-Type: application/json
 ```
 
-All POST and PUT requests must set `Content-Type: application/json` (except multipart file uploads). There is no OAuth, no sessions, no HMAC request signing.
+Deeplink staging requests also require Basic Auth credentials provided during onboarding. The API key associates the hosted application with the platform so it can later be accessed through EnrollConnect. All POST and PUT requests must set `Content-Type: application/json` except multipart file uploads. These APIs do not use OAuth, session authentication, or HMAC request signing.
 
 ## Security & Credentials
 
-The integrator is responsible for the security of their own systems, API credentials, webhook endpoints, and any PII or PHI they process. This skill provides API shape guidance only; it does not exempt integrators from standard secure-development practices.
-
-**Credential handling**
-- API keys, webhook signing secrets, and staging Basic Auth credentials are secrets. Treat them like database passwords: store in environment variables or a secret manager, never in source code, never in client-side bundles, never in version control.
-- Rotate credentials if compromise is suspected. Contact your HealthSherpa account manager to issue replacements.
-
-**Server-side only**
-- All HealthSherpa API calls (Quoting, EnrollConnect, Deeplink, Payment Method, Payment Redirect, Plan Lookup) must be made from a server you control. Frontend code must call your own backend, which then calls HealthSherpa.
-- The payment redirect form and deeplink `Location` URL are the only HealthSherpa surfaces a browser interacts with directly. Before redirecting, validate the URL uses `https://` and (for deeplinks) points at a HealthSherpa host.
-- Send payment method requests through the PCI-compliant proxy URL provided by HealthSherpa. The proxy tokenizes the bank account number in transit.
-
-**PII / PHI**
-- These endpoints transmit SSN, ITIN, DOB, signatures, addresses, employer FEIN, household income, and bank account details. Treat all payloads as sensitive.
-- Do not log full request or response bodies. Redact at minimum: `ssn`, `itin`, `date_of_birth`, `signature`, `email`, `phone`, `residential_address`, `mailing_address`, `hra.employer.fein`, `annual_household_income`, `eft_routing`, and `eft_number`. HealthSherpa already redacts SSN/ITIN in the `events` timeline. Apply the same standard to your own storage and logs.
-- HIPAA, state privacy laws, and CMS requirements apply to integrators independent of this skill.
-
-**Webhook endpoint**
-- Serve over HTTPS only.
-- Authenticate every request using the method you configured during onboarding (HealthSherpa supports a variety of methods; requests carry headers consistent with that method). Reject requests that fail authentication before any business logic runs.
-- Process events idempotently (dedupe by `transaction_id`) to handle repeat deliveries safely.
-
-**Defensive rendering**
-- When building the payment redirect HTML form, require the returned `method` to be `POST`. HTML-escape `endpoint`, `method`, every `field.name`, and every `field.value` before insertion. Validate `endpoint` begins with `https://`.
-- Do not interpolate response data into HTML, SQL, shell commands, or file paths without escaping/parameterization.
-
-**TLS**
-- Never disable certificate verification when calling HealthSherpa APIs (no `verify=False`, no `rejectUnauthorized: false`).
-
-**Errors and retries**
-- Do not retry 4xx responses (401, 403, 422). These are deterministic and indicate a payload or auth issue that retrying will not fix.
-- Use the `retry_after` header on 429 responses for backoff.
+Keep API keys, Basic Auth credentials, webhook credentials, and trusted proxy or redirect configuration in server-side secret/configuration storage. Fail closed during startup or request preflight when required credentials, payment-proxy configuration, or payment-redirect origins are missing. Rotate credentials after suspected compromise and contact the HealthSherpa account manager for replacements. An API key authenticates the platform, not its end user. Before create or Deeplink, authorize the current user for the tenant, employer, household, selected plan, and enrollment action; bind the returned `application_id` to that scope. Before later calls, authorize the user for the specific application and action. Treat application, HRA, payment, and document payloads as sensitive. Never log full bodies; redact identity, signature, address, employer, income, and bank fields. Authenticate webhooks before processing and deduplicate by `transaction_id`. Require HTTPS and TLS verification. Integrators must determine and meet the HIPAA, state privacy, and CMS obligations applicable to their role, data, and workflow. Validate and escape payment redirects as described in [payment-and-documents.md](references/payment-and-documents.md). Do not retry deterministic 4xx responses; honor `retry_after` for 429 responses.
 
 ## Critical Rules
 
-- ALWAYS use `x-api-key` header for authentication. No OAuth, no sessions.
+- ALWAYS use `x-api-key` for QuoteConnect, EnrollConnect, and Deeplink. Staging Deeplink requests also require Basic Auth.
 - ALWAYS call HealthSherpa endpoints from server-side code. NEVER embed the API key, webhook secret, or staging Basic Auth credentials in browser, mobile, or any client-distributed code.
 - ALWAYS load the API key from an environment variable or secret manager. NEVER hardcode it in source code or commit it to version control.
+- Before EnrollConnect create or Deeplink, authorize the current user for the source tenant, employer, household, selected plan, and action. Bind any returned `application_id` to that authorized scope.
+- ALWAYS authorize the current platform user for the specific application and requested action before an application-scoped API call. A partner API key alone is not end-user authorization.
 - ALWAYS use HTTPS. NEVER disable TLS certificate verification to work around connection errors.
+- For Deeplink, require a 302 response, parse `Location`, require HTTPS and the exact HealthSherpa origin for the environment, reject userinfo and unexpected ports, and reject every other status or destination.
+- Treat all response fields as untrusted at their destination. Parameterize SQL, avoid shell interpolation by passing values as separate arguments, allowlist file-path components, and escape values before rendering HTML.
 - NEVER log full request or response bodies. Applicant fields including `ssn`, `itin`, `date_of_birth`, `signature`, `email`, full `residential_address`, and `hra.employer.fein` must be redacted from logs and error reports.
 - ALWAYS authenticate webhook requests using the method configured during onboarding. Reject requests that fail authentication before any business logic runs.
 - ALWAYS use `application_id` (not `id`) as the application identifier in responses.
@@ -82,15 +56,16 @@ The integrator is responsible for the security of their own systems, API credent
 - ALWAYS include `signatures.signature_date` and `applicants.primary.signature` — these are required for submission.
 - ALWAYS use `street_address_1`/`street_address_2` (not `street_line_*`).
 - ALWAYS include `residential_address.fips_code` on application create and update requests so HealthSherpa can validate plan availability in the applicant's county. Quoting uses `fip_code`; enrollment applications use `fips_code`.
-- ALWAYS use `gender` (not `sex`) and `uses_tobacco` (not `tobacco_use`).
+- Use `gender` for applicant identity and `uses_tobacco` for tobacco status. The responsible-party object uses its documented `sex` field.
 - ALWAYS use `state_supplement_*` for state signature fields (not `addendum_*`).
-- In the request, `pediatric_dental` (string enum: `"purchased_separately"` / `"not_applicable"`) goes under `attestations`. In the response, it's a top-level field. `pediatric_dental_signature` goes under `signatures`.
+- In the request, `pediatric_dental` (string enum: `"purchased_separately"` / `"not_applicable"`) goes under `attestations`. Read the saved value from `response.application.pediatric_dental`. `pediatric_dental_signature` goes under `signatures`.
 - For carriers that offer qualified dental (currently HCSC — Blue Cross and Blue Shield of IL, MT, NM, OK, and TX), the ACA pediatric dental requirement must be satisfied **exactly one way** per application: send `attestations.pediatric_dental` OR a top-level `dental_plan_hios_id`, never both and never neither. Sending both, or neither, returns a 422 (`Invalid dental selection`). See "Qualified Dental (HCSC)".
 - ALWAYS include top-level `hra` with employer `name`, `fein`, and `address` on every ICHRA enrollment. When `enrollment_requirements.hra.per_applicant_hra` is true, also collect and send `hra` under the primary and every non-child dependent relationship supported by the selected carrier, using the returned allowed values. Do not collect per-applicant HRA answers from children. Send the household follow-up at top-level `qsehra_both_employers_claim_reimbursement` when its returned condition applies.
 - NEVER require `external_id`. It is optional everywhere.
 - NEVER assume real-time payment confirmation. Most carriers report asynchronously via feeds.
 - ALWAYS fetch `enrollment_requirements` via `GET /plans/:hios_id?plan_year=YYYY&include=enrollment_requirements`. Process returned `attestations`, `special_enrollment_period.event_types`, applicant questions, communication preferences, HRA requirements, and proof-of-residency instructions. Use the returned questions, content, labels, options, date windows, and conditional requiredness. Omitted keys do not apply to the selected plan.
 - When `communication_preferences.email_contact_consent.required` is true, show the returned carrier content and collect an explicit Yes or No. Send the boolean at `communication_preferences.email_contact_consent`; both `true` and `false` satisfy requiredness.
+- When `communication_preferences.agrees_hsa_contact_opt_in` is an object, show its returned carrier-defined `content` and option labels. If `required` is true, require an explicit `true` or `false`; omission or null is a blocking error. If `required` is false, the answer is optional. Send any answer at `communication_preferences.agrees_hsa_contact_opt_in`. A false answer satisfies requiredness and does not block enrollment in the health plan. If the requirement or its parent is absent or null, do not show or send the field. Reject non-boolean answers.
 - When the plan returns Wellpoint Texas communication-impairment requirements, collect `applicants.primary.has_communication_impairment`. A `true` answer requires `communication_impairment_format`; `other` also requires `communication_impairment_format_other`. A `false` answer must remain an explicit No.
 - Interpret each SEP reason's `event_date_days_before` and `event_date_days_after` relative to today. They define how far the qualifying-event date may be in the past or future; they are not enrollment windows measured from the event.
 - ALWAYS include `agent_of_record` with at minimum `first_name`, `last_name`, and `national_producer_number` on every enrollment. Without it, the enrollment may not be attributed to the correct agent or broker.
@@ -172,7 +147,7 @@ If multiple counties are returned, prompt the user to select one. Pass the `fips
 
 ### Deeplink Enrollment
 
-Use when `deeplink_enrollment: true` and `api_enrollment: false`. Redirects user to HealthSherpa UI.
+Use when `deeplink_enrollment: true` and the platform selects Deeplink before any EnrollConnect create request. When both flags are true, prefer EnrollConnect. Deeplink redirects the user to HealthSherpa UI.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -201,9 +176,13 @@ sep_docs_required → sep_docs_under_review → pending_effectuation
 | `cancelled` | Policy never took effect (never effectuated), typically non-payment. Some carriers do not support requesting this. |
 | `terminated` | Policy was active and later ended (consumer, carrier, or plan-year expiration) |
 
+Use `sep_docs_*` as `policy_status` values only when they are returned for a
+currently SEP-suspended application. For other document workflows, use
+`document_status` and do not synthesize a `sep_docs_*` policy status.
+
 ## Minimum Viable Payload
 
-The API does not support partial creates. `POST /applications` validates the full payload on create and rejects incomplete requests. Build the complete payload before calling create.
+The API expects the full application shape on create. Build the complete payload before calling `POST /applications`. A structurally invalid request can return `422`; a `201` means the draft exists but can still include blocking errors and is not ready to submit until they are resolved.
 
 Required fields vary by carrier. Some carriers require SSN, race/ethnicity, hispanic origin, language, and other fields that are optional for others. The safest approach is to always send the full set below.
 
@@ -278,40 +257,16 @@ There is no way to query valid effective dates ahead of time. Omit this field un
 12. Treat `effectuated` as immediate success. After `sep_docs_under_review` or `pending_effectuation`, continue monitoring until `effectuated`.
 13. If `submission_failed`, check errors, fix the application or payment data, and re-submit.
 
-**If `deeplink_enrollment: true` and `api_enrollment: false` (Deeplink):**
+**If Deeplink is selected before create and `deeplink_enrollment: true`:**
 
 5. `POST /public/ichra/off_ex` — flat schema with `_agent_id` (required) and applicant data
 6. Capture `Location` header from 302 response — redirect user's browser (do NOT follow server-side)
 7. User completes enrollment in HealthSherpa UI
-8. Track via webhooks (submission confirmation, then policy status changes)
+8. Track via webhooks. Use the submission webhook's `application_id` with the same platform API key for later EnrollConnect reads.
 
 ## Anthem and Wellpoint In-Flow ACH
 
-Anthem and Wellpoint applications currently use in-flow ACH when `payment_instructions.payment_required_with_submission` is `true`. Do not select this flow from the carrier name alone. Use the application response and its `next_actions`.
-
-Before creating the application, follow the selected plan's enrollment requirements:
-
-- For Anthem plans that return `communication_preferences.email_contact_consent`, display the full carrier text and submit the consumer's explicit boolean answer.
-- For Wellpoint Texas plans that return communication-impairment requirements, submit the primary applicant's Yes or No answer and any conditionally required format fields. Include `attestations.disclosure_statement_accepted: true` when the Texas HMO consumer-choice disclosure is returned.
-
-1. Create the application and retain its `application_id`.
-2. Resolve any `supporting_documentation_required` error.
-3. Confirm `payment_required_with_submission: true` and require `rel: "payment_method"` in `next_actions`. Require method `PUT` and an `href` matching the current application. If the action is absent or invalid, stop and contact HealthSherpa.
-4. Build the ACH request at runtime and send it through the PCI-compliant proxy URL provided by HealthSherpa.
-5. Require `200 OK` from `PUT /api/v1/applications/:id/payment_method`.
-6. Call `POST /api/v1/applications/:id/submit`.
-
-The current public integration supports `payment_method_type: "bank_account"`. For Anthem and Wellpoint:
-
-- `payment_type: "initial"` covers the binder payment only.
-- `payment_type: "both"` covers the binder payment and recurring premiums.
-- The endpoint enum includes `payment_type: "recurring"`, but there is no current Anthem or Wellpoint use case for recurring without an initial payment; that request returns `422`. Use `"initial"` or `"both"`.
-- `withdraw_day` applies to recurring ACH, accepts integers from 1 through 28, and defaults to `1` when omitted.
-- For staging-only tests, the carrier-provided `PERSONALSAVINGS` fixture uses routing `071205850`, account `23487289374982`, `eft_type: "savings"`, and `eft_level: "personal"`. Synthetic account-holder names are accepted, but both `first_name` and `last_name` are required. Never use this fixture in production.
-
-HealthSherpa transmits the bank and payment-selection data from the platform to Anthem or Wellpoint but does not initiate withdrawals. The carrier debits the first payment for `"initial"` and the first plus recurring monthly payments for `"both"`, using `withdraw_day` for the monthly schedule.
-
-The successful response returns masked payment information, including `payment_method_type`, `payment_type`, `masked_account`, `status`, `is_recurring`, and `withdraw_day`. See [payment-and-documents.md](references/payment-and-documents.md) for the complete request and response.
+Use in-flow ACH only when `payment_instructions.payment_required_with_submission` is true and a valid `payment_method` action is returned. See [payment-and-documents.md](references/payment-and-documents.md) for request validation, payment types, staging fixtures, and response handling. See [carrier-examples.md](references/carrier-examples.md) for Anthem and Wellpoint enrollment fields.
 
 ## Enrollment Requirement Content
 
@@ -349,23 +304,7 @@ These are NOT under the same object. Missing either causes a 422 on submit.
 
 ## Qualified Dental (HCSC)
 
-Some carriers offer qualified dental and require the ACA pediatric dental essential health benefit to be satisfied on every application. Currently this applies to **HCSC** — the Blue Cross and Blue Shield plans in IL, MT, NM, OK, and TX. Apply the exact-one rule to HCSC plans even when `enrollment_requirements.attestations.pediatric_dental.required` is false; that flag does not expose the qualified-dental rule. Use the returned `attestation_text` and `options` when the consumer takes the attestation path.
-
-**Satisfy it exactly one way per application — never both, never neither:**
-
-1. **Attestation** — set `attestations.pediatric_dental` to one of the values from `enrollment_requirements.attestations.pediatric_dental.options` (currently `"purchased_separately"` or `"not_applicable"`). Use this when there are no children under 19 on the application, or the member already has stand-alone pediatric dental coverage.
-2. **Stand-alone dental plan** — set the top-level `dental_plan_hios_id` to a qualified stand-alone dental plan's HIOS ID (and omit `attestations.pediatric_dental`). Use this when the member wants to buy pediatric dental coverage alongside the medical plan.
-
-Sending both `dental_plan_hios_id` and `attestations.pediatric_dental`, or sending neither, returns a `422` with `Invalid dental selection`.
-
-**Rules for `dental_plan_hios_id`:**
-
-- The dental plan must belong to the **same carrier** as the medical plan, be off-exchange eligible for the plan year, and be available in the member's service area (zip). A mismatched carrier or ineligible/out-of-area plan returns `422` (`No plan found for dental_plan_hios_id: <id>`, or `dental_plan_hios_id has a carrier mismatch to the health plan`).
-- Discover eligible dental plans with a **ZIP/FIPS-scoped dental quote**: `POST /quotes` with `dental_search: true` and the member's `zip_code`, `fip_code`, and `state`. Because it is scoped to the member's location, it returns only plans in their service area, so it is the reliable way to pick a plan that will pass create. Then confirm the chosen plan's issuer matches the medical plan's issuer: a `dental_search` quote can also return another carrier's dental plans, and `issuer_hios_ids` does not reliably restrict dental results. HCSC's stand-alone dental is "BlueCare Dental" under the same issuer prefix as the medical plan (e.g. `36096IL0830001` for BCBS IL). The `GET /plans?state=..&plan_year=..&dental_only=true&off_ex=true` list is state-level (useful for browsing or caching a catalog) but is **not** filtered by the member's service area, so a plan taken straight from it can still fail create with a `422` when it is not available at the member's ZIP. Validate service area with the dental quote before enrolling. See [quoting-and-plans.md](references/quoting-and-plans.md).
-- On `PUT`, to switch from one path to the other, explicitly send `null` for the field you are clearing (e.g. set `dental_plan_hios_id: null` when moving to the attestation path).
-- Both `dental_plan_hios_id` (top-level) and `pediatric_dental` are echoed back on `GET`/create responses, so you can confirm which path was recorded.
-
-HCSC also does **not** support post-enrollment changes, cancellations, or renewals (`supports_changes` is `false`), requires SEP documentation for every SEP reason including `offered_ichra` (10 MB limit), and does not require SSN. See the HCSC entry in [carrier-examples.md](references/carrier-examples.md) for a full worked payload of both dental paths.
+HCSC medical applications in IL, MT, NM, OK, and TX must include exactly one of `attestations.pediatric_dental` or top-level `dental_plan_hios_id`. Both or neither returns `422`. A selected dental plan must share the medical carrier and be available in the member's service area. Confirm the saved path from `response.application.pediatric_dental` and `response.application.dental_plan_hios_id`. When switching paths on PUT, send `null` for the field being cleared. See [data-model.md](references/data-model.md), [quoting-and-plans.md](references/quoting-and-plans.md), and [carrier-examples.md](references/carrier-examples.md).
 
 ## Document Upload
 
@@ -389,42 +328,7 @@ Include `document_type` at the top level alongside the file. The API rejects upl
 
 ## Create/Detail Response Structure
 
-The `POST /applications` and `GET /applications/:id` responses nest the application data under an `application` key. Metadata fields are at the top level:
-
-```json
-{
-  "application_id": "HSA000739499",
-  "application": {
-    "external_id": "your-tracking-id",
-    "plan_hios_id": "13877AZ0070072",
-    "plan_year": 2026,
-    "policy_status": "draft",
-    "applicants": { "primary": { ... }, "dependents": [...] },
-    "residential_address": { ... },
-    "attestations": { ... },
-    "signatures": { ... },
-    "special_enrollment_period": { ... },
-    "hra": { ... },
-    "policies": [],
-    "submitted_at": null
-  },
-  "errors": [...],
-  "next_actions": [...],
-  "payment_instructions": { ... }
-}
-```
-
-**You MUST flatten this.** A correct normalization:
-
-```
-const flat = {
-  ...response.application,
-  application_id: response.application_id,
-  errors: response.errors,
-  next_actions: response.next_actions,
-  payment_instructions: response.payment_instructions,
-};
-```
+Create and detail responses put application data under `application`, while `application_id`, `errors`, `next_actions`, and `payment_instructions` remain top-level. Flatten both levels in the client. See [data-model.md](references/data-model.md).
 
 ## Submit Response
 
@@ -438,7 +342,7 @@ const flat = {
 
 The 202 means the submission job was queued. It does not confirm carrier acceptance and does not return `policy_status`. An immediate `GET /applications/:id` can still return `draft` while the background job runs.
 
-Poll `GET /applications/:id` with backoff or use webhooks until the application reaches:
+Poll `GET /applications/:id` with backoff or use webhooks after submission:
 
 - `effectuated`: coverage is already active. Treat this as immediate success even if no poll observed `pending_effectuation`.
 - `sep_docs_under_review`: carrier review is in progress. Continue monitoring.
@@ -447,57 +351,11 @@ Poll `GET /applications/:id` with backoff or use webhooks until the application 
 
 Do not treat a transient `draft` immediately after 202 as success or failure. Bound this state with a submission grace period. If the application remains `draft` for more than one hour, alert and reconcile the queued job before considering another submit.
 
+API responses establish only the reported API operation and status. A 202 confirms queueing, and `sep_docs_under_review` or `pending_effectuation` is not payment, carrier acceptance, or effectuation confirmation. Do not claim an 834, SFTP transfer, application PDF, or carrier acknowledgement unless that downstream event is observed separately.
+
 ## Listing Applications
 
-```
-GET /api/v1/applications?policy_status=effectuated&limit=25&offset=0
-```
-
-| Parameter | Type | Description |
-|---|---|---|
-| `policy_status` | enum | `draft`, `submission_failed`, `sep_docs_required`, `sep_docs_under_review`, `pending_effectuation`, `effectuated`, `cancelled`, `terminated` |
-| `external_id` | string | Filter by your tracking ID |
-| `plan_year` | integer | Filter by plan year |
-| `issuer_hios_id` | string | Filter by carrier |
-| `plan_hios_id` | string | Filter by plan |
-| `employer_external_id` | string | Filter by employer |
-| `updated_since` | datetime | ISO 8601. Returns applications updated after this time. |
-| `limit` | integer | Page size (default 25, max 100) |
-| `offset` | integer | Offset for pagination (default 0) |
-
-Response structure:
-
-```json
-{
-  "applications": [
-    {
-      "application_id": "HSA000739499",
-      "external_id": "your-tracking-id",
-      "status": "draft",
-      "plan_year": 2026,
-      "plan_hios_id": "13877AZ0070072",
-      "issuer_hios_id": "13877",
-      "policy_status": "draft",
-      "policy_effective_date": null,
-      "state": "AZ",
-      "primary_applicant": {
-        "external_id": null,
-        "member_id": "HSM001145562",
-        "first_name": "Jane",
-        "last_name": "Doe",
-        "date_of_birth": "1990-05-15"
-      },
-      "created_at": "2026-04-28T13:56:56.119Z",
-      "updated_at": "2026-04-28T13:56:56.838Z"
-    }
-  ],
-  "pagination": {"total_count": 61, "limit": 25, "offset": 0}
-}
-```
-
-Use `application_id` from each list item to link to the detail view (`GET /applications/:id`).
-
-Note: list items use `primary_applicant` (flat object with `member_id`, `first_name`, `last_name`) — not the `applicants.primary` structure used in create/detail responses.
+`GET /api/v1/applications` supports status, external ID, plan, issuer, employer, update time, limit, and offset filters. List items use `primary_applicant`, not `applicants.primary`; pagination uses `total_count`. Use each `application_id` to fetch detail. See [data-model.md](references/data-model.md).
 
 ## Applicant Matching on PUT
 
@@ -508,36 +366,7 @@ Note: list items use `primary_applicant` (flat object with `member_id`, `first_n
 
 ## Post-Enrollment Changes
 
-After an application has been submitted, partners can make changes to the enrollment via the API if the carrier supports it. This enables demographic corrections (e.g., email, phone, address) and, during Open Enrollment, plan changes.
-
-### Checking Support
-
-The `GET /applications/:id` response includes:
-
-| Field | Type | Description |
-|---|---|---|
-| `supports_changes` | boolean | Whether the carrier supports any post-enrollment changes for this application |
-| `can_change_plan` | boolean | Whether a plan change is currently allowed (requires Open Enrollment and carrier support) |
-| `can_report_change` | boolean | Whether demographic changes can be submitted |
-
-Additionally, `next_actions` will include a `change_plan` action when plan changes are available.
-
-### Change Workflow
-
-1. `GET /applications/:id` — confirm `supports_changes` is `true`
-2. `PUT /applications/:id` — send the full application payload with changes applied. All identity fields (`first_name`, `last_name`, `date_of_birth`) must be included even if unchanged, as omitted fields are treated as `null`.
-3. `POST /applications/:id/submit` — resubmit to apply the changes at the carrier
-
-### Identity Protection
-
-To prevent accidental identity swaps, the API blocks certain simultaneous changes on submitted applications:
-- Changing both `first_name` and `last_name` at the same time is rejected
-- Changing `date_of_birth` together with a name change is rejected
-- Individual corrections (e.g., fixing a typo in `last_name` alone) are allowed
-
-### Carriers Without Change Support
-
-Some carriers do not support post-enrollment changes via the API. For these carriers, `supports_changes` will be `false` and update attempts on submitted applications will return a `422` error. Partners should direct members to contact the carrier directly for changes on these enrollments.
+For a draft, require the validated `update` action and send the full PUT payload; do not submit unless submission was requested. For a submitted demographic change, require `supports_changes`, `can_report_change`, and a `next_actions` entry with `rel: "update"`, method `PUT`, and href `/api/v1/applications/{application_id}`. For a plan change, require `supports_changes`, `can_change_plan`, and the same validated update action. Send the full payload with all identity fields, then require the returned submit action. Call cancel or terminate only through its matching action. If support is false, direct the member to the carrier. See [data-model.md](references/data-model.md).
 
 ## Error Format
 
@@ -547,7 +376,7 @@ All endpoints return errors in a single format:
 {"errors": [{"code": "missing_required_field", "field": "applicants.primary.date_of_birth", "message": "Date of birth is required"}]}
 ```
 
-Create (201) and GET (200) include `errors` even on success for informational items like `supporting_documentation_required`.
+Create (201) and GET (200) can include prerequisites or blocking validation errors. A 201 means the draft exists, not that it is ready to submit. Retain its `application_id`, route `supporting_documentation_required` to document upload, and correct other errors on that draft with a full PUT. Do not retry create.
 
 ## HATEOAS
 
@@ -555,12 +384,12 @@ Every application response includes `next_actions`. Use it to determine availabl
 
 ```json
 "next_actions": [
-  {"rel": "self", "href": "/api/v1/applications/HSA000000001", "method": "GET"},
+  {"rel": "_self", "href": "/api/v1/applications/HSA000000001", "method": "GET"},
   {"rel": "submit", "href": "/api/v1/applications/HSA000000001/submit", "method": "POST"}
 ]
 ```
 
-The array is state-aware. After submission, `submit` disappears and `cancel` appears. Use `rel` values to drive your UI rather than hardcoding status-to-action mappings.
+The array is state-aware. After submission, `submit` disappears; `cancel` or `terminate` appears only when the carrier and application state support that action. Use `rel` values to drive your UI rather than hardcoding status-to-action mappings.
 
 ## Enrollment Decision Path
 
@@ -568,7 +397,7 @@ The array is state-aware. After submission, `submit` disappears and `cancel` app
 
 | `api_enrollment` | `deeplink_enrollment` | Backend Routing |
 |---|---|---|
-| `true` | `true` | Prefer EnrollConnect (full lifecycle). Fall back to deeplink. |
+| `true` | `true` | Prefer EnrollConnect. Choose Deeplink only before creating an EnrollConnect application. |
 | `true` | `false` | EnrollConnect only. |
 | `false` | `true` | Deeplink only. Redirect user to HealthSherpa UI. |
 | `false` | `false` | Not enrollable through HealthSherpa. Hide or disable the enroll button. |
@@ -581,6 +410,8 @@ Always check these flags before routing. If `api_enrollment` is `false` for a pl
 
 **IMPORTANT: You MUST include `off_ex: true` in every quoting request.** The API only supports off-exchange enrollment. Without this parameter, the API returns on-exchange plans which are not supported.
 
+Never retry create or switch to Deeplink automatically after a timeout or ambiguous EnrollConnect create response. If transport-level evidence proves the request was never sent, a new attempt is safe. Otherwise use a bounded reconciliation period and manual intervention; a negative lookup is not proof that an asynchronous create did not occur.
+
 ## Carrier-Specific Behavior
 
 - Some carriers reject specific SEP reasons — the API returns a 422 with a descriptive error
@@ -588,6 +419,38 @@ Always check these flags before routing. If `api_enrollment` is `false` for a pl
 - Carrier-specific fields may cause 422 on create if missing
 
 Always check the `errors` array on create and the `next_actions` on GET to understand what's available.
+
+### BCBS Michigan Individual Medical
+
+Use issuer `15560` for Blue Cross Blue Shield of Michigan PPO and issuer `98185` for Blue Care Network HMO. Quote current inventory and check each plan's enrollment flags; do not hardcode example plan IDs.
+
+- Fetch plan requirements. For plan year 2026, the returned options allow `spouse` and `child`, require race/ethnicity for every applicant, and require SEP documentation for every returned SEP reason.
+- Send one valid `ssn` or `itin` for every applicant. Send explicit `us_citizen`, `resides_in_state`, and `uses_tobacco` booleans. The primary also needs `phone_type`: `home`, `cell`, or `work`.
+- Send top-level `hra.offered_hra` and the complete HRA and employer data. Both ICHRA and QSEHRA are supported.
+- When plan requirements return `communication_preferences.agrees_hsa_contact_opt_in`, display the exact returned BCBSM or BCN `content` and option labels and follow its `required` value. BCBSM's content asks whether the consumer wants to enroll in a HealthEquity HSA. Preserve either boolean answer at `communication_preferences.agrees_hsa_contact_opt_in`; do not use `hsa_contact_opt_in` or interpret false as missing.
+- Treat applicant `member_id` as opaque. Store and return the exact value on draft PUT; never construct one or match applicants by array position.
+- Follow `payment_instructions`. BCBSM and BCN use post-submit payment redirect and phone payment, with no payment method required before submit.
+- Under the 2026 contract, BCBSM and BCN do not return post-submit update, cancel, or terminate actions. Always check current response capabilities and direct members to the carrier when an action is absent.
+- BCBS Michigan is not HCSC. Do not apply HCSC qualified-dental rules to these Michigan medical plans.
+
+See [carrier-examples.md](references/carrier-examples.md) for a complete request and [payment-and-documents.md](references/payment-and-documents.md) for the redirect flow.
+
+### AmeriHealth Caritas Next
+
+Quote current inventory rather than hardcoding plans. AmeriHealth Caritas Next issuer IDs are `72760` in Delaware, `67926` in Florida, `38246` in Louisiana, `17414` in North Carolina, and `73107` in South Carolina. South Carolina plans use the First Choice Next consumer brand.
+
+- Under the 2026 application contract, require an SSN for each applicant age one or older on the request date. An applicant younger than one may omit it.
+- Send explicit citizenship and state-residency answers. A false answer makes the applicant ineligible for the plan.
+- The 2026 primary-applicant fields include `marital_status`, `language_spoken`, and `language_written`. Follow returned options; the marital-status values are `married`, `unmarried`, `divorced`, and `widowed`. Use `cell` or `work` for `phone_type`; `home` is not accepted.
+- Use the selected plan's returned relationship options. The 2026 medical options are `spouse` and `child`.
+- Render the returned responsible-party question for a child-only application. When the consumer identifies another person as responsible for payment, send `applicants.primary.responsible_party` using the returned field-level conditions and relationship options. Otherwise omit the object. For a minor primary applicant, include guardian details and set `applicants.primary.signature` to the guardian's exact full name.
+- Follow each SEP event's `documentation_required` value. For 2026 AmeriHealth Caritas Next plans, the returned events require `document_type: "sep"` before submit.
+- The 2026 AmeriHealth contract uses SEP suspension. After required documents are uploaded and submit returns `202`, the application can remain `sep_docs_under_review` while eligibility is reviewed. For `sep_docs_required`, prompt for upload. For `sep_docs_under_review`, poll with a bounded stale-review alert. For `sep_docs_denied`, stop passive polling and prompt for corrected documents or escalation. None of these statuses confirms effectuation.
+- Drive the HSA question only from `enrollment_requirements`. For 2026 AmeriHealth Caritas Next plans, `agrees_hsa_contact_opt_in` is absent even when `hsa_eligible` is true, so do not render or send it.
+- In Louisiana, render the returned out-of-network disclosure. For a broker-assisted North Carolina application, render and collect the returned NC licensed-agent attestation.
+- Do not apply HCSC qualified-dental rules. Follow the returned pediatric-dental requirement.
+
+See [carrier-examples.md](references/carrier-examples.md) for a complete request.
 
 ## Rate Limits
 

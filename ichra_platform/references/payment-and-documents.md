@@ -38,6 +38,10 @@ otherwise:
 
 NEVER hardcode payment behavior per carrier. Always read from `payment_instructions`.
 
+### BCBS Michigan medical
+
+BCBSM PPO and BCN HMO applications return `payment_required_with_submission: false`, `payment_redirect_supported: true`, and `pay_by_phone_supported: true`. Submit first. The payment redirect is an HTTPS `POST` form with an opaque `SAMLResponse` field. HTML-escape every returned field while preserving its decoded form value, and never log it. Read the instructions, endpoint, fields, and phone number from each application response instead of hardcoding them.
+
 ## PUT /payment_method
 
 Use this endpoint when `payment_required_with_submission` is `true`. Anthem and Wellpoint currently use this in-flow ACH path. The create or GET response may include a `missing_required_field` error for `payment_method` until this call succeeds.
@@ -61,11 +65,26 @@ Validate the action before joining its `href` to the PCI proxy base URL:
 - `href` must equal `/api/v1/applications/{application_id}/payment_method` for the current application.
 - Reject unexpected methods, hosts, paths, and application ID mismatches.
 
-Send the request from your backend through the PCI-compliant proxy URL provided by HealthSherpa. The proxy tokenizes the bank account number in transit. Do not send this request from browser code, and do not log `eft_routing`, `eft_number`, or the full request body.
+Send the request from your backend through the PCI-compliant proxy URL provided by HealthSherpa. The proxy tokenizes the bank account number in transit. Reject every HTTP redirect so credentials and bank data cannot leave the pinned origin. Do not send this request from browser code, and do not log `eft_routing`, `eft_number`, or the full request body.
 
-Build the payment object at runtime from the consumer's billing and bank information. Do not save a reusable request file containing bank details or hardcode test fixtures in production code.
+Build the payment object at runtime from the consumer's billing and bank information. Do not save a reusable request file containing bank details or hardcode test fixtures in production code. Pin the exact payment-proxy origin supplied during onboarding in server-side deployment configuration; never accept it from a request.
 
 ```javascript
+const apiKey = process.env.HS_API_KEY;
+if (!apiKey || !paymentProxyBaseUrl || !pinnedPaymentProxyOrigin) {
+  throw new Error("HealthSherpa payment configuration is unavailable");
+}
+
+const paymentProxyUrl = new URL(paymentProxyBaseUrl);
+if (
+  paymentProxyUrl.protocol !== "https:" ||
+  paymentProxyUrl.origin !== pinnedPaymentProxyOrigin ||
+  paymentProxyUrl.username ||
+  paymentProxyUrl.password
+) {
+  throw new Error("Invalid HealthSherpa payment proxy origin");
+}
+
 const expectedPath =
   `/api/v1/applications/${encodeURIComponent(applicationId)}/payment_method`;
 const paymentAction = nextActions.find(
@@ -115,11 +134,12 @@ const paymentMethod = {
 };
 
 const response = await fetch(
-  `${paymentProxyBaseUrl}${paymentAction.href}`,
+  `${paymentProxyUrl.origin}${paymentAction.href}`,
   {
     method: "PUT",
+    redirect: "error",
     headers: {
-      "x-api-key": process.env.HS_API_KEY,
+      "x-api-key": apiKey,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(paymentMethod),
@@ -151,7 +171,7 @@ Anthem and Wellpoint provided the following personal savings account for Elevanc
 
 The carrier's `PERSONALSAVINGS` account type maps to `eft_type: "savings"` plus `eft_level: "personal"`. The API still requires separate `first_name` and `last_name` fields; synthetic account-holder values are accepted for this staging fixture.
 
-This fixture was verified with HealthKeepers Virginia on July 27, 2026 and Wellpoint Texas on July 29, 2026. `PUT /payment_method` returned `200` with the account masked as `****4982`. Recurring requests using `payment_type: "both"` and `withdraw_day: 12` then received `202` from `/submit` and remained `pending_effectuation` without carrier errors through 90 seconds of polling. This confirms the payment method and submission were accepted; it does not confirm payment collection or final effectuation.
+For this fixture, a successful `PUT /payment_method` returns `200` with a masked account. A later `202` from `/submit` confirms only that HealthSherpa queued the submission. Neither response confirms carrier acknowledgement, payment collection, 834 or SFTP delivery, or final effectuation.
 
 Required fields:
 
@@ -213,19 +233,36 @@ GET /api/v1/applications/:id/payment_redirect
 | 404 | Application was not found, or the carrier does not support payment redirect |
 | 422 | Application has not been submitted or another redirect prerequisite is invalid |
 
-Build a hidden HTML form from the response and auto-submit it to redirect the user to the carrier's payment page. Use the returned `method`, and require it to be `POST`. Validate that `endpoint` begins with `https://` and HTML-escape every interpolated value (`endpoint`, `method`, each `field.name`, and each `field.value`) before insertion. Carrier-supplied field values may legitimately contain characters that break unescaped HTML, and defense-in-depth requires escaping even though the response originates from HealthSherpa.
+Build a hidden HTML form only from a fresh, authenticated HealthSherpa response for the current authorized application. Never accept the endpoint or fields from a browser parameter or persisted client value. Require a non-empty exact-origin allowlist supplied during onboarding. Parse the endpoint, require HTTPS, reject userinfo, and require its origin to appear in that allowlist. Require the returned method to be `POST`. HTML-escape every interpolated value (`endpoint`, `method`, each `field.name`, and each `field.value`) while preserving its decoded form value. Carrier-supplied field values may contain characters that break unescaped HTML.
 
-```html
-<!-- Pseudocode. htmlEscape() must escape &, <, >, ", ' -->
-<!-- Validate endpoint.startsWith("https://") before rendering. -->
-<!-- Require method.toUpperCase() === "POST". -->
-<form id="payment-form" method="${htmlEscape(method)}" action="${htmlEscape(endpoint)}">
-  <!-- For each field in fields[]: -->
-  <input type="hidden"
-         name="${htmlEscape(field.name)}"
-         value="${htmlEscape(field.value)}" />
-</form>
-<script>document.getElementById('payment-form').submit();</script>
+```javascript
+// endpoint, method, and fields come from the fresh HealthSherpa response.
+const paymentUrl = new URL(endpoint);
+if (!paymentRedirectOriginAllowlist?.size) {
+  throw new Error("Payment redirect origins are not configured");
+}
+if (
+  paymentUrl.protocol !== "https:" ||
+  paymentUrl.username ||
+  paymentUrl.password ||
+  !paymentRedirectOriginAllowlist.has(paymentUrl.origin)
+) {
+  throw new Error("Payment redirect origin is not allowed");
+}
+if (method.toUpperCase() !== "POST") {
+  throw new Error("Payment redirect must use POST");
+}
+
+// htmlEscape() escapes &, <, >, ", and ' while preserving form values.
+const hiddenInputs = fields.map(
+  ({ name, value }) =>
+    `<input type="hidden" name="${htmlEscape(name)}" value="${htmlEscape(value)}">`
+).join("");
+const formHtml =
+  `<form id="payment-form" method="${htmlEscape(method)}" ` +
+  `action="${htmlEscape(paymentUrl.toString())}">${hiddenInputs}</form>`;
+document.body.insertAdjacentHTML("beforeend", formHtml);
+document.getElementById("payment-form").submit();
 ```
 
 For redirect flows, the carrier page handles payment collection. For in-flow ACH, HealthSherpa securely accepts and forwards the payment method as part of carrier submission.
@@ -287,3 +324,4 @@ Fields:
 - Supported formats: PDF, PNG, JPG.
 - Upload BEFORE calling `/submit`.
 - After upload, `document_status` on the application transitions from `required` to `uploaded`.
+- For plan year 2026, BCBS Michigan medical requirements mark documentation as required for every returned SEP type, including `offered_ichra` and `offered_qsehra`.
