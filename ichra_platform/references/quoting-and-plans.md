@@ -69,6 +69,7 @@ HRA/ICHRA data is part of the enrollment application (`POST /api/v1/applications
 | `cost_sharing` | object | See cost_sharing fields below |
 | `benefits` | object | Benefit coverage details |
 | `adult_dental` | boolean | Plan covers adult dental (relevant for dental plan grouping) |
+| `dental_only` | boolean | Whether the result is dental-only. Require `false` when selecting medical coverage. |
 | `hsa_eligible` | boolean | HSA-eligible plan |
 
 ### cost_sharing Field Names
@@ -112,11 +113,43 @@ After quoting, route enrollment based on the flags on each plan:
 ```
 api_enrollment == true        → POST /api/v1/applications (EnrollConnect)
 deeplink_enrollment == true   → POST /public/ichra/off_ex (Deeplink)
-both true                     → your choice (API gives full control; deeplink is simpler)
+both true                     → prefer EnrollConnect; choose Deeplink only before create
 both false                    → not enrollable through HealthSherpa
 ```
 
 NEVER attempt EnrollConnect for a plan with `api_enrollment: false`. The API will reject the request with a 422. A plan may have `deeplink_enrollment: true` but `api_enrollment: false` — always check both flags per plan.
+
+Do not use Deeplink as an automatic retry after an EnrollConnect timeout or
+ambiguous create response. Retry only when transport-level evidence proves the
+request was never sent. Otherwise use bounded reconciliation and manual
+intervention; a negative application lookup is not proof that an asynchronous
+create did not occur.
+
+### BCBS Michigan medical plans
+
+BCBS Michigan uses two issuer families: `15560` for BCBSM PPO and `98185` for BCN HMO. Include those values in `issuer_hios_ids` when narrowing a Michigan medical quote, but still validate each returned plan:
+
+- `off_ex` was requested as `true`
+- `api_enrollment` is `true`
+- `dental_only` is `false`
+- `plan_type` is the product expected by the user
+
+Use `hsa_eligible` to distinguish HSA plans. Do not infer product or enrollment support from the issuer ID alone, and do not hardcode the returned plan HIOS IDs across plan years.
+
+### AmeriHealth Caritas Next medical plans
+
+AmeriHealth Caritas Next issuer IDs are `72760` in Delaware, `67926` in
+Florida, `38246` in Louisiana, `17414` in North Carolina, and `73107` in South
+Carolina. South Carolina uses the First Choice Next consumer brand. Quote
+current inventory and require `api_enrollment: true` and `dental_only: false`;
+issuer presence does not guarantee plan availability for a specific ZIP.
+
+For plan year 2026, `agrees_hsa_contact_opt_in` is absent from AmeriHealth
+Caritas Next plan requirements even when `hsa_eligible` is true. Applicability
+comes from `plan.enrollment_requirements.communication_preferences`, not
+`hsa_eligible` or carrier identity. When the field is absent, do not render or
+send it; if a selected plan returns it, follow the returned content, options,
+and requiredness.
 
 ## Dental Plan Quoting (HCSC / qualified-dental carriers)
 
@@ -247,6 +280,17 @@ The response nests requirements under `plan.enrollment_requirements`. The exampl
           }
         }
       },
+      "communication_preferences": {
+        "agrees_hsa_contact_opt_in": {
+          "required": true,
+          "question": "Would you like to enroll in a HealthEquity HSA?",
+          "content": "Carrier-defined HSA information and consent text.",
+          "options": [
+            {"value": true, "label": "Yes"},
+            {"value": false, "label": "No"}
+          ]
+        }
+      },
       "applicants": {
         "primary": {
           "marital_status": {
@@ -261,6 +305,8 @@ The response nests requirements under `plan.enrollment_requirements`. The exampl
 }
 ```
 
+The HSA question and content strings above illustrate the response shape only. Display the values returned for the selected plan, not the example text.
+
 **Key rules:**
 - Keys that are absent or null are not required for that carrier/state.
 - `electronic_signature_consent.content` may contain `%{signature_name}` — replace with the applicant's full legal name before displaying. All other placeholders are resolved server-side.
@@ -269,6 +315,9 @@ The response nests requirements under `plan.enrollment_requirements`. The exampl
 - `special_enrollment_period.event_types` is an object keyed by the request enum. Use only returned keys, enforce the returned date window, and follow `documentation_required`.
 - `event_date_days_before` is how far the event date may be in the past relative to today; `event_date_days_after` is how far it may be in the future.
 - Process returned applicant, communication-preference, HRA, and proof-of-residency requirements in addition to attestations.
+- When `communication_preferences.agrees_hsa_contact_opt_in` is an object, render its exact carrier-defined `question`, `content`, and `options`. Require an explicit boolean when `required` is true; treat it as optional when `required` is false. False is a valid answer and does not block enrollment in the health plan.
+- If `communication_preferences` or `agrees_hsa_contact_opt_in` is absent or null, the HSA question does not apply to the selected plan. Do not render it or send the payload field, and do not infer applicability from the carrier name.
+- For plan year 2026, BCBS Michigan medical metadata requires race/ethnicity for primary and dependents, limits dependent relationships to `spouse` and `child`, and marks every returned SEP reason as documentation-required.
 - `state_supplement_*` content may be an array of paragraphs.
 - Call once when the user selects a plan. Cache the result.
 
