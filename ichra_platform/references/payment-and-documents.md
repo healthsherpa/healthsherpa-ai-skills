@@ -288,7 +288,14 @@ NEVER rely on this for real-time payment confirmation. It is an asynchronous car
 
 ## Document Upload
 
-Required for some SEP types. After creating an application, check the `errors` array for a `supporting_documentation_required` entry.
+The API distinguishes evidence that must be uploaded before initial submission from evidence that a carrier may request or review later. It does not provide a universal promise that no later evidence will be needed.
+
+Read the selected event's `documentation_required` value from plan requirements:
+
+- `true`: a file is required before initial submission. After create, expect `supporting_documentation_required` until upload succeeds.
+- `false`: a file is not required to submit. The value does not answer whether the carrier may request evidence later. Do not display "no documents required." Encourage the applicant to provide available proof and follow later carrier requests.
+
+Also display the returned `special_enrollment_period.documentation.guidance` and `optional_upload_notice`. When `post_enrollment_upload_days` is present, communicate that upload window.
 
 ```
 POST /api/v1/applications/:id/supporting_documentation
@@ -322,6 +329,9 @@ Fields:
 - `document_type` is required. The API rejects uploads without it.
 - Max file size is **carrier-dependent**. Most carriers allow ~2 MB, but some are higher (currently Oscar 50 MB, HCSC 10 MB) and limits change over time. Do not hardcode a fixed cap; if an upload is rejected for size, check the carrier's current limit with your account manager.
 - Supported formats: PDF, PNG, JPG.
-- Upload BEFORE calling `/submit`.
-- After upload, `document_status` on the application transitions from `required` to `uploaded`.
+- When the selected event returns `documentation_required: true`, upload before calling `/submit`.
+- When it returns `false`, do not block submission. Offer upload whenever the application returns `next_actions.rel: "upload_supporting_documentation"`, including after submission when supported.
+- After upload, monitor `document_status`; typical values are `uploaded`, `verified`, or `denied`. A carrier can later move the application to `required`.
+- Do not interpret `document_status: "none_needed"` or `documentation_required: false` as a promise that the carrier will never ask for eligibility evidence.
+- Avera currently keeps optional SEP upload available until 30 days after application submission.
 - For plan year 2026, BCBS Michigan medical requirements mark documentation as required for every returned SEP type, including `offered_ichra` and `offered_qsehra`.

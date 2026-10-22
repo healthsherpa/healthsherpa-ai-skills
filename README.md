@@ -50,6 +50,7 @@ ichra_platform/
     data-model.md                   # Request/response schemas, field types
     quoting-and-plans.md            # Quoting API, plan lookup, FIPS resolution
     deeplink-enrollment.md          # Deeplink schema, 302 handling, flat field mapping
+    carrier-examples.md             # Requirements-driven carrier examples
     payment-and-documents.md        # Payment flows, document upload
     webhooks-and-monitoring.md      # Webhook payloads, polling, reconciliation
   evals/

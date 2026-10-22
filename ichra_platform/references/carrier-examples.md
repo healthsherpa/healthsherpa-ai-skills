@@ -18,7 +18,7 @@ _Reference examples for building successful off-exchange ICHRA enrollments throu
 
 ## Conventions used in every example (best practices)
 
-- **Enums are lowercase snake_case**; dates are ISO 8601 (`YYYY-MM-DD`); money is a string (`"50.50"`).
+- **Request enums are lowercase snake_case**; dates are ISO 8601 (`YYYY-MM-DD`); premium fields in responses and HRA amount and income fields in requests are JSON numbers.
 - **Field names:** `street_address_1`/`street_address_2` (not `street_line_*`), applicant `gender` (not `sex`), and `uses_tobacco` (not `tobacco_use`). The `responsible_party` sub-object is the exception and uses `sex`.
 - **Signatures are split** — `applicants.primary.signature` (typed legal name) **and** `signatures.signature_date`. Both are required to submit.
 - **Always include `hra`** with employer `name`, `fein`, and nested `address`, plus an `agent_of_record` (`first_name`, `last_name`, `national_producer_number`).
@@ -50,7 +50,7 @@ Each returned plan includes `hios_id` plus `api_enrollment` and `deeplink_enroll
 
 ## The enrollment flow
 
-**1. Create:** `POST /api/v1/applications` with the carrier payload below. A `201` creates the draft, but it can include prerequisites in `errors`. An empty array means it is ready for submit. Route `supporting_documentation_required` to the document step and `missing_required_field` for `payment_method` to the payment step. Stop for other errors.
+**1. Create:** `POST /api/v1/applications` with the carrier payload below. A `201` creates the draft, but it can include prerequisites in `errors`. An empty array means it is ready for submit. Route `supporting_documentation_required` to the document step and `missing_required_field` for `payment_method` or the required HSA contact answer to its correction step. Stop for other errors.
 
 ```bash
 curl -sS -X POST 'https://api.ichra.healthsherpa.com/api/v1/applications' \
@@ -58,7 +58,7 @@ curl -sS -X POST 'https://api.ichra.healthsherpa.com/api/v1/applications' \
   -d @create_payload.json
 ```
 
-**2. (If required) Upload documentation** — `POST /api/v1/applications/{application_id}/supporting_documentation`. Use `document_type: "sep"` for qualifying-event proof or `"proof_of_residency"` when plan requirements indicate residency proof is required. **Maximum file size is carrier-dependent** — most carriers allow ~2 MB, but some are higher (currently Oscar 50 MB, HCSC 10 MB) and limits change over time. Keep uploads as small as possible; if a file is rejected for size, check the current limit for that carrier with your account manager.
+**2. Upload available documentation** — `POST /api/v1/applications/{application_id}/supporting_documentation`. Use `document_type: "sep"` for qualifying-event proof or `"proof_of_residency"` when plan requirements indicate residency proof is required. When the selected event returns `documentation_required: true`, upload before submit. When it returns `false`, submission is not blocked, but that does not mean proof will never be needed. Encourage upload when evidence is available and follow later document actions or carrier requests. **Maximum file size is carrier-dependent** — most carriers allow ~2 MB, but some are higher (currently Oscar 50 MB, HCSC 10 MB) and limits change over time. Keep uploads as small as possible; if a file is rejected for size, check the current limit for that carrier with your account manager.
 
 ```bash
 curl -sS -X POST 'https://api.ichra.healthsherpa.com/api/v1/applications/{application_id}/supporting_documentation' \
@@ -81,7 +81,152 @@ curl -sS -X POST 'https://api.ichra.healthsherpa.com/api/v1/applications/{applic
 
 ## Carrier examples
 
-All carriers below are `api_enrollment: true`. Every section provides a complete create payload. Fetch `enrollment_requirements` for the selected plan, then follow the document, payment, and submit steps above.
+The carrier sections below provide either a complete create payload or the exact carrier-specific fields to apply to the complete request shape in [data-model.md](data-model.md). Fetch `enrollment_requirements` for the selected plan, require `api_enrollment: true`, and then follow the document, payment, and submit steps above.
+
+### Avera Health Plans
+
+> **Validated in HealthSherpa staging on September 17, 2026.** The current examples are PY2026 South Dakota plans under issuer `60536`. Quote for current inventory and confirm the plan's enrollment flags rather than hardcoding these IDs or assuming another Avera market is available.
+
+- **Non-HSA example plan:** `60536SD0060034`, Sioux Falls ZIP `57104`, FIPS `46099`.
+- **HSA example plan:** `60536SD0060021`.
+- **Enrollment routing:** Both tested plans returned `api_enrollment: true` and `deeplink_enrollment: true`. Prefer EnrollConnect unless Deeplink is selected before create.
+- **Identity:** Every applicant age one or older needs either `ssn` or `itin`.
+- **Applicant answers:** Send `uses_tobacco` and `race_ethnicity` for every applicant. Send `language_spoken` and `language_written` for the primary. Citizenship and state-residency answers are not collected.
+- **Contact and household:** Use a physical residential address, not a PO box. `phone_type` accepts `home`, `work`, or `cell`. `marital_status` is optional with `single` and `married` as current values.
+- **Dependents:** Current relationships are `spouse`, `domestic_partner`, and `child`. Every dependent needs `has_disability`; a child also needs `has_qualified_medical_child_support_order`.
+- **Age exception:** A non-disabled child dependent can enroll through age 25. A non-disabled full-time student can enroll through age 28 by sending `full_time_student: true`; Avera does not require `graduation_date` for this exception.
+- **HRA:** Always send the complete top-level HRA, employer FEIN and address, `premium_payer`, `household_size`, `annual_household_income`, and `annual_household_income_determination`. Use `w2_wages`, `rate_of_pay_hourly`, or `fpl` for the determination. When `premium_payer` is `tpa`, send the HealthSherpa-assigned identifier at application top-level `tpa_slug` and any direct contact values under `hra` using `tpa_name`, `tpa_phone_number`, `tpa_street_address`, `tpa_street_address_unit_number`, `tpa_city`, `tpa_state`, `tpa_zip_code`, and `tpa_county`. Current plan requirements return `hra: null`, so do not interpret absent HRA metadata as permission to omit these fields.
+- **SEP documents:** Current returned reasons use `documentation_required: false`. This means proof does not block initial submission. Encourage applicants to upload available evidence, display the returned optional-upload notice, and offer the supporting-documentation action until 30 days after application submission.
+- **HSA question:** The tested HSA plan returned a required Fidelity contact-consent question. When this requirement is returned, send the explicit boolean at `communication_preferences.agrees_hsa_contact_opt_in`; `false` is a valid Opt-out and does not block enrollment.
+- **Payment:** Read `payment_instructions` before submit. Current responses do not require a payment method before submit and provide payment redirect and pay-by-phone afterward. Follow a future response if that changes.
+- **Agent:** Send the standard `agent_of_record` with NPN. Do not add a carrier producer code or broker license ID.
+- **Lifecycle:** Current applications advertise update, supporting-documentation, payment-redirect, and cancellation actions after submission. Use the current response before every change, cancellation, or termination.
+
+The standard non-HSA subscriber request is:
+
+```json
+{
+  "external_id": "your-tracking-id-001",
+  "plan_hios_id": "60536SD0060034",
+  "plan_year": 2026,
+  "residential_address": {
+    "street_address_1": "100 Test Avenue",
+    "city": "Sioux Falls",
+    "state": "SD",
+    "zip_code": "57104",
+    "fips_code": "46099"
+  },
+  "mailing_address": {
+    "street_address_1": "100 Test Avenue",
+    "city": "Sioux Falls",
+    "state": "SD",
+    "zip_code": "57104",
+    "fips_code": "46099",
+    "different_from_home_address": false,
+    "billing_use_only": false
+  },
+  "applicants": {
+    "primary": {
+      "external_id": "member-001",
+      "first_name": "Jordan",
+      "last_name": "Example",
+      "date_of_birth": "1988-01-15",
+      "gender": "male",
+      "itin": "<9-digit-itin>",
+      "email": "jordan.example@example.com",
+      "phone": "6055550100",
+      "phone_type": "cell",
+      "marital_status": "single",
+      "uses_tobacco": false,
+      "race_ethnicity": "white",
+      "language_spoken": "english",
+      "language_written": "english",
+      "existing_coverage": {
+        "has_existing_coverage": false
+      },
+      "signature": "Jordan Example"
+    },
+    "dependents": []
+  },
+  "agent_of_record": {
+    "first_name": "Pat",
+    "last_name": "Broker",
+    "national_producer_number": "<agent-npn>",
+    "email": "agent@example.com",
+    "phone": "6055550101"
+  },
+  "hra": {
+    "offered_hra": true,
+    "type": "ichra",
+    "amount": 500,
+    "contribution_covers": "premium",
+    "start": "2026-10-01",
+    "employer": {
+      "name": "Example Employer LLC",
+      "fein": "<employer-fein>",
+      "phone": "6055550199",
+      "address": {
+        "street_address_1": "200 Test Street",
+        "city": "Sioux Falls",
+        "state": "SD",
+        "zip_code": "57104",
+        "fips_code": "46099"
+      }
+    },
+    "premium_payer": "employer",
+    "household_size": 1,
+    "annual_household_income": 60000,
+    "annual_household_income_determination": "w2_wages"
+  },
+  "special_enrollment_period": {
+    "event_type": "offered_ichra",
+    "event_date": "2026-09-17"
+  },
+  "attestations": {
+    "agrees_issuer_attestations": true,
+    "electronic_signature_consent": true,
+    "broker_signature_attestation": true,
+    "agent_advised_consumer_of_product_features": true
+  },
+  "signatures": {
+    "signature_date": "2026-09-17"
+  },
+  "communication_preferences": {}
+}
+```
+
+When a current quoted Avera HSA plan returns `agrees_hsa_contact_opt_in`, replace the plan ID and add the returned required answer:
+
+```json
+{
+  "communication_preferences": {
+    "agrees_hsa_contact_opt_in": false
+  }
+}
+```
+
+For a child dependent, merge the current required dependent fields. Use a unique SSN or ITIN for each applicant:
+
+```json
+{
+  "relationship": "child",
+  "first_name": "Sam",
+  "last_name": "Example",
+  "date_of_birth": "2015-03-10",
+  "gender": "female",
+  "ssn": "<9-digit-ssn>",
+  "uses_tobacco": false,
+  "race_ethnicity": "decline_to_answer",
+  "has_disability": false,
+  "has_qualified_medical_child_support_order": false
+}
+```
+
+For a non-disabled child age 26 through 28, also send `full_time_student: true`. Do not send `graduation_date` for the Avera student exception. A non-disabled non-student in that range and any non-disabled child age 29 or older are ineligible.
+
+For child-only coverage, render `enrollment_requirements.applicants.primary.responsible_party`. If another person is responsible for payment, send that object with one of the returned relationships, currently `parent_guardian` or `sibling`. Do not place HRA employer data in `responsible_party`.
+
+The September 17 smoke tests created standard and HSA applications without errors, returned `202` from submit, and reached `pending_effectuation`. The HSA Opt-out persisted as `false`. Continue monitoring beyond that intermediate state. Payment redirect returned an HTTPS POST with opaque SAML data; pass it through using the payment safety rules and do not log it. A September 15 carrier run passed 27 applicable scenarios with no failures, including dependents, updates, cancellation, termination, optional SEP upload, and payment discovery.
 
 ### Blue Cross and Blue Shield of Arizona
 
@@ -408,8 +553,8 @@ For a minor primary applicant, include the guardian fields and set `applicants.p
 - **Plan (example):** `40702AZ0060051` — AZ · ZIP `85001` · FIPS `04013` · plan year 2026
 - **Required attestations:** `electronic_signature_consent`, `agrees_issuer_attestations`, `broker_signature_attestation`, `pediatric_dental`
 - **SSN:** Not required — omit unless you collect it.
-- **SEP documentation:** Not required for `offered_ichra`
-- **Notes:** Straight-through to `pending_effectuation`. Enroll any UnitedHealthcare plan that returns `api_enrollment: true` for the member's county — swap `plan_hios_id` + address per state (quote first). Some states add a state-supplement signature (see "State-specific requirements" below); the plan's `enrollment_requirements` lists exactly which keys to send.
+- **SEP documentation:** Not required before initial submission for `offered_ichra`. Encourage upload when evidence is available and follow later carrier requests.
+- **Notes:** Straight-through to `pending_effectuation` without a pre-submission document. Enroll any UnitedHealthcare plan that returns `api_enrollment: true` for the member's county — swap `plan_hios_id` + address per state (quote first). Some states add a state-supplement signature (see "State-specific requirements" below); the plan's `enrollment_requirements` lists exactly which keys to send.
 
 ```json
 {
@@ -497,6 +642,7 @@ For a minor primary applicant, include the guardian fields and set `applicants.p
 - **State supplements:** Render and send every state supplement returned in `enrollment_requirements`. For example, Colorado can require primary and disclosures signatures.
 - **Anthem electronic communications:** When plan requirements return `communication_preferences.email_contact_consent`, display the returned carrier content and send the consumer's explicit boolean answer. Both Yes and No are valid.
 - **Wellpoint Texas accessible materials:** When plan requirements return the primary communication-impairment questions, send the explicit Yes or No answer and any required format fields. Braille uses `communication_impairment_format: "braille"`.
+- **Anthem Statement of Accountability:** In CA, CO, and NV, send the two primary-applicant Statement of Accountability booleans. When either is `true`, include the translator details. See [data-model.md](data-model.md).
 
 > **Staging test data only.** The SSN below is the designated fake value. The payment example uses the personal savings fixture provided for Elevance staging and verified with HealthKeepers Virginia on July 27, 2026 and Wellpoint Texas on July 29, 2026. Never use these values in production.
 
@@ -735,6 +881,7 @@ Use `payment_type: "initial"` for the first payment only. Use `"both"` for the f
 - **SSN:** Not required — omit unless you collect it.
 - **SEP documentation:** **Required** — upload before submit
 - **Notes:** Requires SEP supporting documentation for `offered_ichra`. Upload a doc after create, then submit.
+- **California Statement of Accountability:** For an Ambetter California plan, send the two primary-applicant Statement of Accountability booleans. When either is `true`, include the translator details. See [data-model.md](data-model.md).
 
 ```json
 {
@@ -902,8 +1049,8 @@ Use `payment_type: "initial"` for the first payment only. Use `"both"` for the f
 - **Plan (example):** `34762MO0590026` — MO · ZIP `64101` · FIPS `29095` · plan year 2026
 - **Required attestations:** `electronic_signature_consent`, `agrees_issuer_attestations`, `broker_signature_attestation`, `pediatric_dental`
 - **SSN:** Required — include a valid SSN (or ITIN where the carrier accepts one).
-- **SEP documentation:** Not required for `offered_ichra`
-- **Notes:** Straight-through to `pending_effectuation`.
+- **SEP documentation:** Not required before initial submission for `offered_ichra`. Encourage upload when evidence is available and follow later carrier requests.
+- **Notes:** Straight-through to `pending_effectuation` without a pre-submission document.
 
 ```json
 {
@@ -1070,8 +1217,8 @@ Use `payment_type: "initial"` for the first payment only. Use `"both"` for the f
 - **Plan (example):** `77552OH0010222` — OH · ZIP `43215` · FIPS `39049` · plan year 2026
 - **Required attestations:** `electronic_signature_consent`, `agrees_issuer_attestations`, `broker_signature_attestation`, `pediatric_dental`
 - **SSN:** Not required — omit unless you collect it.
-- **SEP documentation:** Not required for `offered_ichra`
-- **Notes:** Straight-through to `pending_effectuation`.
+- **SEP documentation:** Not required before initial submission for `offered_ichra`. Encourage upload when evidence is available and follow later carrier requests.
+- **Notes:** Straight-through to `pending_effectuation` without a pre-submission document.
 
 ```json
 {
@@ -1147,13 +1294,26 @@ Use `payment_type: "initial"` for the first payment only. Use `"both"` for the f
 }
 ```
 
+### CoxHealth
+
+Quote current Missouri inventory under issuer `96384` and require `api_enrollment: true`; do not hardcode a plan ID. Apply these CoxHealth fields to the complete request shape:
+
+- Require an SSN, `uses_tobacco`, and `race_ethnicity` for every applicant.
+- Require the primary's `marital_status`; current values use the standard single and married options.
+- Do not send citizenship or state-residency answers unless current requirements return them.
+- Use only the returned relationships. CoxHealth currently supports `spouse` and `child`.
+- Send the complete HRA and employer block. CoxHealth collects affordability, TPA, and employer FEIN information and requires the HRA offer answer. Current `contribution_covers` values are `premium` and `premium_oop`.
+- Current SEP events return `documentation_required: false`. This means proof does not block initial submission. Encourage upload when evidence is available and use the current supporting-documentation action during the returned post-submit window.
+- CoxHealth does not present an HSA contact question or pediatric-dental attestation through the current carrier configuration. Continue to follow live requirements.
+- Read payment instructions and lifecycle actions from the application response.
+
 ### Christus
 
 - **Plan (example):** `98780LA0220003` — LA · ZIP `71101` · FIPS `22017` · plan year 2026
 - **Required attestations:** `electronic_signature_consent`, `agrees_issuer_attestations`, `broker_signature_attestation`, `pediatric_dental`
 - **SSN:** Not required — omit unless you collect it.
-- **SEP documentation:** Not required for `offered_ichra`
-- **Notes:** Straight-through to `pending_effectuation`.
+- **SEP documentation:** Not required before initial submission for `offered_ichra`. Encourage upload when evidence is available and follow later carrier requests.
+- **Notes:** Straight-through to `pending_effectuation` without a pre-submission document.
 
 ```json
 {
@@ -1313,13 +1473,43 @@ Use `payment_type: "initial"` for the first payment only. Use `"both"` for the f
 
 > After create, run **step 2 (upload SEP documentation)** above, then **step 3 (submit)**.
 
+### Group Health Cooperative
+
+> **Validated in HealthSherpa staging on September 30, 2026.** The tested PY2026 Wisconsin plans used issuer `94529` in Madison, ZIP 53703, FIPS 55025. Quote current inventory instead of hardcoding those plans.
+
+- Every applicant requires an SSN and race or ethnicity.
+- Send the primary's `phone_type`, `language_spoken`, and `language_written`.
+- Current gender options include `male`, `female`, and `x`.
+- Current dependent relationships are `spouse`, `domestic_partner`, and `child`. Follow the returned adult-signature metadata.
+- When an HSA plan returns the required Fidelity question, display the returned content and send `communication_preferences.agrees_hsa_contact_opt_in`. An explicit `false` is complete and does not block enrollment.
+- Plan requirements return `hra.explicit_dependent_hra_offer_supported: true`. When a dependent answers separately, send only `offered_hra: true` or `false`, or `offered_hra_unknown: true`, under `applicants.dependents[].hra`. Omit the dependent HRA block, or send `offered_hra: null`, to inherit the application-level answer. A dependent can answer `offered_hra: true` only when the application-level `hra.offered_hra` is also `true`. Keep employer and contribution details in the complete top-level HRA. This offer-only behavior is separate from `per_applicant_hra`.
+- Current returned SEP events require proof before submission. Upload `document_type: "sep"` before submit.
+- Current responses support application updates, dependent addition and removal, cancellation before effectuation, payment discovery, and application search. Follow live capabilities and actions.
+
+The September 30 run passed 25 applicable scenarios with no failures. Submitted applications reached `pending_effectuation`; the future-effective cancellation reached `cancelled`. These results do not prove carrier effectuation or downstream file delivery.
+
+### Jefferson Health Plans
+
+> **Validated in HealthSherpa staging on September 29, 2026.** The tested PY2026 Pennsylvania plan used issuer `93909`. Quote current inventory and require `api_enrollment: true`.
+
+- Every applicant requires an SSN and race or ethnicity.
+- Send the primary's `marital_status`, `phone_type`, `language_spoken`, and `language_written`.
+- Do not send citizenship or state-residency answers unless current requirements return them.
+- Use the full dependent relationship option set returned by the selected plan. Do not replace it with a generic spouse and child list.
+- Jefferson asks tobacco questions of dependents rather than the primary and collects the child medical-support-order answer where applicable.
+- For a child-only application, render the returned responsible-party question. When another person is responsible for payment, send the responsible-party object using a returned relationship and keep HRA employer data out of it.
+- Send the complete top-level HRA and an explicit HRA offer answer.
+- Follow returned dependent-signature metadata; the primary signature and application signature date are always separate.
+- Current returned SEP events require proof before submission. Upload `document_type: "sep"` before submit.
+- The September 29 recreation submitted five applications, delivered their SEP documents, and successfully queued two future-effective cancellations. No HSA contact requirement was returned for the selected plan.
+
 ### Antidote
 
 - **Plan (example):** `68445AZ0600010` — AZ · ZIP `85001` · FIPS `04013` · plan year 2026
 - **Required attestations:** `electronic_signature_consent`, `agrees_issuer_attestations`, `broker_signature_attestation`, `pediatric_dental`
 - **SSN:** Required — include a valid SSN (or ITIN where the carrier accepts one).
-- **SEP documentation:** Not required for `offered_ichra`
-- **Notes:** Straight-through to `pending_effectuation`.
+- **SEP documentation:** Not required before initial submission for `offered_ichra`. Encourage upload when evidence is available and follow later carrier requests.
+- **Notes:** Straight-through to `pending_effectuation` without a pre-submission document.
 
 ```json
 {
@@ -1566,6 +1756,23 @@ Use `payment_type: "initial"` for the first payment only. Use `"both"` for the f
 
 > After create, run **step 2 (upload SEP documentation)** above, then **step 3 (submit)**.
 
+### Quartz
+
+> **Validated in HealthSherpa staging on September 30, 2026.** The tested PY2026 plans used issuer `37833` in Wisconsin and issuer `70373` in Minnesota. Quote current inventory rather than hardcoding those plans.
+
+- Every applicant requires an SSN and race or ethnicity.
+- Ask tobacco only for applicants age 21 or older.
+- Send the primary's spoken and written language values using the exact options returned for the selected plan. Current spoken options include `"American Sign Language"`; written language excludes that value.
+- Current dependent relationships include `spouse`, `domestic_partner`, `child`, `stepchild`, `grandchild`, `adopted_child`, and `ward`.
+- Follow returned adult-signature metadata.
+- For a minor primary applicant, render the returned responsible-party section and send the applicable parent or guardian information.
+- Quartz Wisconsin and Minnesota collect the Statement of Accountability. Send the required primary booleans and conditional translator fields.
+- Current returned SEP events require proof before submission. Upload `document_type: "sep"`. Quartz also supports later document replacement during its returned post-submission window.
+- Current tested HSA plans did not return an HSA contact question. Do not infer one from `hsa_eligible`.
+- Read payment instructions by application. The Wisconsin test returned a payment path; the Minnesota test did not expose one.
+
+The Wisconsin run passed 24 applicable scenarios with no failures. The Minnesota run passed 23, had no failures, and marked payment as not verifiable because no payment instructions were returned.
+
 ### HCSC (Blue Cross and Blue Shield — IL / MT / NM / OK / TX)
 
 HCSC is the carrier behind Blue Cross and Blue Shield of Illinois, Montana, New Mexico, Oklahoma, and Texas. It is the one carrier here that **offers qualified dental**, so every application must satisfy the ACA pediatric dental requirement exactly one way (see below).
@@ -1674,13 +1881,13 @@ HCSC is the carrier behind Blue Cross and Blue Shield of Illinois, Montana, New 
 
 ## Multi-member households
 
-Add dependents under `applicants.dependents` (an array). Each dependent needs `relationship` (`spouse`, `child`, or `domestic_partner`) and the same identity fields as the primary, plus:
+Add dependents under `applicants.dependents` (an array). Each dependent needs a `relationship` value returned for the selected plan and the same identity fields as the primary. Do not reduce the returned options to a generic spouse, child, and domestic-partner list; carriers such as Quartz return additional relationships.
 
-- `has_disability` and `full_time_student` (booleans) on every dependent. When `full_time_student` is `true`, also send `graduation_date`.
-- A typed `signature` on each adult dependent (spouse or domestic partner); children do not sign.
+- `has_disability` and `full_time_student` (booleans) on every dependent when required. When `full_time_student` is `true`, also send `graduation_date` unless the carrier explicitly omits it, as Avera does for its student age exception.
+- A typed dependent `signature` when the selected plan's returned signature metadata requires one. For current Avera plans, an adult domestic partner signs and a spouse does not.
 - `ssn` only when the carrier requires it (see each carrier above); dependents may otherwise omit it.
 
-Always include the top-level `hra` object with employer details. When plan requirements return `hra.per_applicant_hra: true`, also send `hra` under the primary and every non-child dependent relationship supported by the selected carrier, using the returned `contribution_covers` values. Do not send per-applicant HRA answers for children. Otherwise, do not duplicate the household HRA answer per applicant. The example below (primary + spouse + child) was verified end-to-end for a carrier that does not require per-applicant HRA answers.
+Always include the top-level `hra` object with employer details. When plan requirements return `hra.per_applicant_hra: true`, also send `hra` under the primary and every non-child dependent relationship supported by the selected carrier, using the returned `contribution_covers` values. Do not send these per-applicant HRA details for children. When `hra.explicit_dependent_hra_offer_supported: true`, a dependent can instead send only `offered_hra` or `offered_hra_unknown` under its own `hra` block; omission or `offered_hra: null` inherits the application-level answer, and a dependent cannot answer `true` unless the application-level answer is also `true`. If neither requirement is returned, do not duplicate the household HRA answer per applicant. The example below (primary + spouse + child) was verified end-to-end for a carrier that does not require per-applicant HRA answers.
 
 ```json
 {
@@ -1729,9 +1936,7 @@ Some states require an additional **state-supplement signature** alongside the p
 
 | State | Add to `signatures` |
 |---|---|
-| New Jersey (NJ) | `state_supplement_primary_signature` |
 | Colorado (CO) | `state_supplement_primary_signature`, `state_supplement_disclosures_signature` |
-| Utah (UT) | `state_supplement_primary_signature`, `state_supplement_spouse_signature` (spouse only when a spouse is on the application) |
 
 Texas HMO plans can return
 `enrollment_requirements.attestations.tx_hmo_consumer_choice_disclosure`.
@@ -1740,13 +1945,14 @@ Display its `content`. When
 checkbox and send `attestations.disclosure_statement_accepted: true`. Do not
 require acceptance when the disclosure does not include a checkbox label.
 
-Example (`signatures` block for a NJ enrollment):
+Example (`signatures` block for a Colorado enrollment):
 
 ```json
 {
   "signatures": {
     "signature_date": "2026-06-15",
-    "state_supplement_primary_signature": "Jane Doe"
+    "state_supplement_primary_signature": "Jane Doe",
+    "state_supplement_disclosures_signature": "Jane Doe"
   }
 }
 ```
@@ -1760,9 +1966,10 @@ Example (`signatures` block for a NJ enrollment):
 | `applicants.primary.signature` / `signatures.signature_date` | Signature split not honored | Send both — typed name on the applicant, date in `signatures` |
 | `agrees_issuer_attestations` / `electronic_signature_consent` | Required attestation omitted | Include all attestations listed for that carrier |
 | `hra` | HRA answer missing | Include the top-level `hra` block. If plan requirements return `hra.per_applicant_hra: true`, also send HRA answers for the primary and every non-child dependent, plus any conditionally required top-level QSEHRA household follow-up |
-| `applicants[n].has_disability` / `full_time_student` / `signature` | Required dependent fields omitted | Send `has_disability` and `full_time_student` on every dependent, and a `signature` on adult dependents |
-| `ssn` (`invalid_field_value` on submit) | Carrier requires the primary's SSN | Include a valid `ssn` for carriers marked **SSN: Required** |
-| `supporting_documentation_required` | Carrier requires SEP proof (e.g., BCBS AZ) | Upload via `/supporting_documentation` then submit |
+| `applicants[n].has_disability` / `full_time_student` / `signature` | A carrier-required dependent field is omitted | Follow the selected plan and carrier rules. Avera requires `has_disability` for every dependent, `full_time_student` only for its age exception, and a signature for the currently returned adult relationships. |
+| `ssn` / `itin` (`invalid_field_value` on submit) | Carrier identity requirement is not satisfied | Follow the carrier rule. BCBS Michigan accepts either value for every applicant. Avera accepts either value for applicants age one or older. Other carriers can require SSN specifically. |
+| `communication_preferences.agrees_hsa_contact_opt_in` | The selected plan returned a required HSA question and the answer is omitted or null | Display the returned content and boolean options, then send an explicit `true` or `false`; false is valid |
+| `supporting_documentation_required` | Carrier requires SEP proof before initial submission (e.g., BCBS AZ) | Upload via `/supporting_documentation` then submit |
 | Proof of residency required | Plan requirements return `proof_of_residency_required: true` | Display `proof_of_residency_text` and upload with `document_type: "proof_of_residency"` before submit |
 | `payment_method` (`missing_required_field`) | `payment_required_with_submission` is true and no payment method has been saved | Use the `payment_method` next action to send ACH through the HealthSherpa-provided PCI proxy, require 200 OK, then submit |
 | `Invalid dental selection` | Qualified-dental carrier (HCSC) got both `dental_plan_hios_id` and `attestations.pediatric_dental`, or neither | Send exactly one. On update, `null` the field you are clearing |

@@ -119,6 +119,8 @@ both false                    → not enrollable through HealthSherpa
 
 NEVER attempt EnrollConnect for a plan with `api_enrollment: false`. The API will reject the request with a 422. A plan may have `deeplink_enrollment: true` but `api_enrollment: false` — always check both flags per plan.
 
+Do not use a static carrier or state allowlist as the source of truth for EnrollConnect availability. The selected plan's live flags are authoritative for the quoted ZIP, county, plan year, and plan.
+
 Do not use Deeplink as an automatic retry after an EnrollConnect timeout or
 ambiguous create response. Retry only when transport-level evidence proves the
 request was never sent. Otherwise use bounded reconciliation and manual
@@ -272,6 +274,11 @@ The response nests requirements under `plan.enrollment_requirements`. The exampl
         }
       },
       "special_enrollment_period": {
+        "documentation": {
+          "guidance": "Documents must support the selected qualifying event.",
+          "optional_upload_notice": "You may submit now and upload proof afterward.",
+          "post_enrollment_upload_days": 30
+        },
         "event_types": {
           "offered_ichra": {
             "event_date_days_before": 60,
@@ -307,11 +314,13 @@ The response nests requirements under `plan.enrollment_requirements`. The exampl
 The HSA content and option labels above illustrate the response shape only. Display the values returned for the selected plan, not the example text.
 
 **Key rules:**
-- Keys that are absent or null are not required for that carrier/state.
+- An absent or null requirements key means the associated conditional question does not apply. It does not make baseline request fields optional; follow the application schema and any carrier-specific guidance in [carrier-examples.md](carrier-examples.md).
 - `electronic_signature_consent.content` may contain `%{signature_name}` — replace with the applicant's full legal name before displaying. All other placeholders are resolved server-side.
 - `pediatric_dental.options` is a `{value: label}` map. Display the label and submit the selected key as `attestations.pediatric_dental`.
 - HCSC qualified-dental applications require exactly one of `attestations.pediatric_dental` or `dental_plan_hios_id`, even when the returned pediatric-dental `required` flag is false.
-- `special_enrollment_period.event_types` is an object keyed by the request enum. Use only returned keys, enforce the returned date window, and follow `documentation_required`.
+- `special_enrollment_period.event_types` is an object keyed by the request enum. Use only returned keys and enforce the returned date window.
+- Treat `documentation_required` as a pre-submission rule. `true` means upload SEP proof before submit. `false` means submission is allowed without a file, not that proof will never be needed. Encourage upload when evidence is available and follow later carrier requests.
+- Display `special_enrollment_period.documentation.guidance` and `optional_upload_notice` when returned. Use `post_enrollment_upload_days` to communicate a post-submit upload window.
 - `event_date_days_before` is how far the event date may be in the past relative to today; `event_date_days_after` is how far it may be in the future.
 - Process returned applicant, communication-preference, HRA, and proof-of-residency requirements in addition to attestations.
 - When `communication_preferences.agrees_hsa_contact_opt_in` is an object, render its exact carrier-defined `content` and option labels. Require an explicit boolean when `required` is true; treat it as optional when `required` is false. False is a valid answer and does not block enrollment in the health plan.

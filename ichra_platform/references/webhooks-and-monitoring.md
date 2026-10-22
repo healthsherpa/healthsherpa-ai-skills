@@ -70,7 +70,7 @@ The Policy Status webhook (`event_type: "sync"`) delivers the lifecycle `policy_
 | `policy_status` | Action |
 |---|---|
 | `pending_effectuation` | Record submission. Coverage pending carrier confirmation (may await binder payment or account setup, even for $0 plans). |
-| `effectuated` | Coverage active and binder payment received. Start HRA reimbursements. |
+| `effectuated` | Carrier-confirmed active coverage. Read the separate `payment.payment_status` before making a payment-dependent decision. Start HRA reimbursements according to your program rules; do not infer binder payment from `policy_status` alone. |
 | `cancelled` | Policy never effectuated (typically non-payment). Stop future reimbursements. |
 | `terminated` | Policy was active and later ended. Reconcile retroactive changes; may require reimbursement clawback. |
 
@@ -79,6 +79,11 @@ The following `policy_status` values are not delivered by the Policy Status webh
 Use `sep_docs_*` rows only when those values are returned as `policy_status`
 for a currently SEP-suspended application. For other document workflows,
 monitor `document_status` instead.
+
+A plan requirement with `documentation_required: false` only means that proof
+does not block initial submission. Continue processing later `document_status`
+changes and supporting-documentation actions. Do not convert the false value
+into a permanent "no documents required" state in your platform.
 
 | `policy_status` | Action |
 |---|---|

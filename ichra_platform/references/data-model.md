@@ -89,7 +89,7 @@ Note: `applicants.primary.signature` (the typed name) is on the applicant object
 | `applicants` | object | Yes | `{primary: {…}, dependents: [{…}]}` |
 | `residential_address` | address | Yes | See Address Object |
 | `external_id` | string | No | Your tracking ID. Optional everywhere. |
-| `tpa_slug` | string | No | HealthSherpa-assigned TPA identifier |
+| `tpa_slug` | string | No | HealthSherpa-assigned TPA identifier. Send at application top level; responses also return it at top level. |
 | `_agent_id` | string | No | HealthSherpa-assigned agent slug |
 | `desired_effective_date` | date | No | Optional. When omitted, carrier auto-determines the date. When provided, must match one of the carrier's valid dates for the SEP reason — some carriers return no valid dates at all, rejecting any value. Omit unless you have a specific reason to override. |
 | `mailing_address` | address+ | No | Address fields plus `different_from_home_address` (bool), `billing_use_only` (bool) |
@@ -111,7 +111,7 @@ Reused for `residential_address`, `mailing_address`, `guardian.mailing_address`.
 }
 ```
 
-Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_line_1`.
+Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_line_1`. Avera requires a physical residential address and does not accept a PO box.
 
 ## Applicants
 
@@ -133,19 +133,22 @@ Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_lin
 | `middle_name`, `suffix` | string | Optional |
 | `date_of_birth` | date | Required. ISO 8601. |
 | `gender` | enum | Required. Common values are `male` and `female`; the 2026 AmeriHealth Caritas Next contract also accepts `x`. NOT `sex`. |
-| `ssn` | string | 9 digits, no dashes. Masked in responses. BCBS Michigan requires either SSN or ITIN for every applicant. For AmeriHealth Caritas Next, SSN is required when the applicant is age one or older on the request date. |
-| `itin` | string | Individual Taxpayer ID (alternative to SSN). BCBS Michigan accepts it in place of SSN. |
+| `ssn` | string | 9 digits, no dashes. Masked in responses. BCBS Michigan requires either SSN or ITIN for every applicant. Avera requires either value when the applicant is age one or older. For AmeriHealth Caritas Next, SSN is required at that age. |
+| `itin` | string | Individual Taxpayer ID (alternative to SSN). BCBS Michigan accepts it for every applicant; Avera accepts it when its age-based identity requirement applies. |
 | `uses_tobacco` | boolean | NOT `tobacco_use` |
 | `us_citizen` | boolean | |
 | `resides_in_state` | boolean | |
 | `currently_incarcerated` | boolean | Carrier-specific. Include for Anthem and Wellpoint. |
-| `marital_status` | enum | Carrier-specific. Anthem and Wellpoint use `single`, `married`, and `domestic_partner`. The 2026 AmeriHealth Caritas Next values are `married`, `unmarried`, `divorced`, and `widowed`. |
+| `marital_status` | enum | Carrier-specific. Avera optionally accepts `single` or `married`. Anthem and Wellpoint use `single`, `married`, and `domestic_partner`. The 2026 AmeriHealth Caritas Next values are `married`, `unmarried`, `divorced`, and `widowed`. |
 | `race_ethnicity` | enum | `white`, `black_or_african_american`, `asian_indian`, `chinese`, `filipino`, `japanese`, `korean`, `vietnamese`, `native_hawaiian`, `guamanian_or_chamorro`, `samoan`, `american_indian_or_alaskan_native`, `decline_to_answer` |
 | `hispanic_origin` | enum | `yes`, `no`, `decline_to_answer` |
 | `hispanic_origin_description` | enum | Only when `hispanic_origin: "yes"`. Values: `cuban`, `mexican_mexican_american_or_chicanx`, `puerto_rican`, `other_hispanic_latino_or_spanish_origin`, `decline_to_answer` |
-| `hra` | object | Send for the primary and every non-child dependent when `enrollment_requirements.hra.per_applicant_hra` is true. Do not send for children. |
+| `full_time_student` | boolean | Carrier-dependent. Avera uses `true` for a child-dependent age exception through age 28 and does not require `graduation_date`. |
+| `graduation_date` | date | Usually required when `full_time_student` is true. Omit for Avera's age exception. |
+| `has_disability` | boolean | Carrier-dependent disability answer. Avera requires it for dependents. |
+| `hra` | object | When `enrollment_requirements.hra.per_applicant_hra` is true, send per-applicant HRA details for the primary and every supported non-child dependent. When `enrollment_requirements.hra.explicit_dependent_hra_offer_supported` is true, a dependent can instead send an offer-only block with `offered_hra` or `offered_hra_unknown`; omission or `offered_hra: null` inherits the application-level answer. A dependent can answer `offered_hra: true` only when application-level `hra.offered_hra` is also `true`. |
 | `existing_coverage` | object | `{has_existing_coverage, plan_replaces_existing_coverage, type, insurer, policy_id, policyholder_name, start_date, term_date, will_continue}`. `type` is `"issuer"` or `"government"`. |
-| `signature` | string | Typed full legal name. Required on primary for submission. |
+| `signature` | string | Typed full legal name. Required on primary for submission. Follow returned dependent signature metadata; current Avera requirements also require it for an adult domestic partner. |
 
 ### Primary-Only Fields
 
@@ -154,14 +157,16 @@ Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_lin
 | `external_id` | string | Optional. Unique within application. |
 | `email` | string | |
 | `phone` | string | |
-| `phone_type` | enum | `cell`, `home`, `work`. The 2026 AmeriHealth Caritas Next values are `cell` and `work`; `cell` maps to the carrier's Personal option. |
-| `language_spoken`, `language_written` | enum | `english`, `spanish`, `arabic`, `chinese`, `french_creole`, `french`, `german`, `gujarati`, `hindi`, `korean`, `polish`, `portuguese`, `russian`, `tagalog`, `urdu`, `vietnamese`, `other`. Both fields are required for the 2026 AmeriHealth Caritas Next primary applicant. |
+| `phone_type` | enum | `cell`, `home`, `work`. Avera accepts all three. The 2026 AmeriHealth Caritas Next values are `cell` and `work`; `cell` maps to the carrier's Personal option. |
+| `language_spoken`, `language_written` | enum | Use the exact options returned for the selected plan. Common normalized values include `english`, `spanish`, `arabic`, `chinese`, `french_creole`, `french`, `german`, `gujarati`, `hindi`, `korean`, `polish`, `portuguese`, `russian`, `tagalog`, `urdu`, `vietnamese`, and `other`, but carrier-specific labels can differ. Quartz currently returns `"American Sign Language"` for spoken language only. Both fields are required for Avera and the 2026 AmeriHealth Caritas Next primary applicant. |
 | `has_communication_impairment` | boolean | Required when returned in `enrollment_requirements.applicants.primary`. Both `true` and `false` are valid answers. |
 | `communication_impairment_format` | enum | Required when `has_communication_impairment` is true. `braille`, `large_print`, `audio`, `other`. |
 | `communication_impairment_format_other` | enum | Required when format is `other`. `encrypted_audio_cd`, `encrypted_data_cd`. |
+| `not_fluent_in_english` | boolean | Statement of Accountability. Send `true` when the primary answers No to whether they read or write English. |
+| `assistance_required` | boolean | Statement of Accountability. Send `true` when the primary answers No to whether they completed the application without assistance. |
+| `translator` | object | `{first_name, middle_name, last_name, reason}`. Required when either Statement of Accountability boolean is `true`. |
 | `guardian` | object | See Guardian |
 | `responsible_party` | object | See Responsible Party Sub-Object below. |
-| `translator` | object | `{first_name, middle_name, last_name, reason}` |
 | `children_live_with_primary` | boolean | |
 | `has_pediatric_dental_coverage` | boolean | |
 | `previously_applied` | boolean | |
@@ -172,7 +177,8 @@ Use `street_address_1` / `street_address_2`. NOT `street_line_1` or `address_lin
 
 | Field | Type | Notes |
 |---|---|---|
-| `relationship` | enum | Required. Use the options returned for the selected plan. BCBS Michigan and 2026 AmeriHealth Caritas Next medical plans accept `spouse` and `child`. Other values are carrier- and state-specific. |
+| `relationship` | enum | Required. Use the options returned for the selected plan. Avera currently accepts `spouse`, `domestic_partner`, and `child`. BCBS Michigan and 2026 AmeriHealth Caritas Next medical plans accept `spouse` and `child`. Other values are carrier- and state-specific. |
+| `has_qualified_medical_child_support_order` | boolean | Child dependents only. Avera requires an explicit answer. |
 
 ### Applicant Matching on PUT
 
@@ -298,6 +304,22 @@ for payment. If no additional responsible party applies, omit
 `applicants.primary.responsible_party`. Do not place HRA employer information
 in this object.
 
+### Statement of Accountability
+
+Ambetter California, Anthem California, Colorado, and Nevada, and Quartz
+Wisconsin and Minnesota collect these primary-applicant fields. Both booleans
+invert the consumer-facing question:
+
+| Question | No answer | Yes answer |
+|---|---|---|
+| Does the applicant read or write English? | `not_fluent_in_english: true` | `not_fluent_in_english: false` |
+| Did the applicant complete this application without assistance? | `assistance_required: true` | `assistance_required: false` |
+
+Send JSON booleans, not strings. When either is `true`, send
+`applicants.primary.translator` with `first_name`, `last_name`, and `reason`.
+Current reason values are `does_not_read_english`, `does_not_speak_english`,
+`does_not_write_english`, and `other`.
+
 ## Agent of Record
 
 Strongly recommended. Without agent of record, the enrollment may not be attributed to the correct agent/broker. Include at minimum `first_name`, `last_name`, `national_producer_number`, `email`, and `phone`.
@@ -340,7 +362,7 @@ Strongly recommended. Without agent of record, the enrollment may not be attribu
     "premium_payer": "employer",
     "household_size": 2,
     "annual_household_income": 75000,
-    "annual_household_income_determination": "self_reported",
+    "annual_household_income_determination": "w2_wages",
     "employer": {
       "name": "Acme Corp",
       "external_id": "emp_123",
@@ -359,6 +381,8 @@ Strongly recommended. Without agent of record, the enrollment may not be attribu
 ```
 
 Employer address is nested under an `address` sub-object within the employer, using the same address schema as `residential_address`.
+
+`premium_payer` accepts `employer`, `employee`, or `tpa`. `annual_household_income_determination` accepts `w2_wages`, `rate_of_pay_hourly`, or `fpl`. When the premium payer is a third-party administrator, send the HealthSherpa-assigned identifier at application top-level `tpa_slug`. Direct contact values belong inside `hra` at `tpa_name`, `tpa_phone_number`, `tpa_street_address`, `tpa_street_address_unit_number`, `tpa_city`, `tpa_state`, `tpa_zip_code`, and `tpa_county`. Do not also send a conflicting `hra.tpa_slug`.
 
 When `plan.enrollment_requirements.hra.per_applicant_hra` is true, also send
 `hra` under `applicants.primary` and every non-child dependent relationship
@@ -386,6 +410,19 @@ Each carrier supports a different subset. Read
 only a returned key. Each value states how far the event date may be before or
 after today and whether documentation is required. HealthSherpa maps the
 canonical key to the carrier's internal format.
+
+`documentation_required` means required **before initial submission**:
+
+- `true`: block submit until a SEP file is uploaded.
+- `false`: allow submit without a file, but do not tell the applicant that
+  evidence is never needed. Encourage upload when proof is available and
+  follow returned post-submission upload actions, deadlines, and document
+  statuses.
+
+Display `special_enrollment_period.documentation.guidance` and
+`optional_upload_notice` when returned. A
+`post_enrollment_upload_days` value defines the carrier's API upload window
+after submission.
 
 ## Attestations
 
@@ -431,7 +468,6 @@ qualified-dental path was saved.
     "pediatric_dental_signature_date": "2026-06-15",
     "translator_signature_date": "2026-06-15",
     "state_supplement_primary_signature": "Jane Smith",
-    "state_supplement_spouse_signature": "John Smith",
     "state_supplement_disclosures_signature": "Jane Smith"
   }
 }
@@ -441,7 +477,7 @@ qualified-dental path was saved.
 
 The primary applicant's typed signature goes under `applicants.primary.signature` — NOT under the `signatures` object. This split is intentional and both are required for a successful submit.
 
-State supplements by state: CO (`primary`, `disclosures`), UT (`primary`, `spouse`), NJ (`primary`).
+The example shows the current Colorado primary and disclosures supplements. The schema also supports `state_supplement_spouse_signature`, but send it only when the selected plan returns that requirement and the application includes a spouse. Always follow returned requirements rather than inferring supplements from state alone.
 
 ## Communication Preferences
 
@@ -495,7 +531,7 @@ Do not use the similarly named `hsa_contact_opt_in`.
 |---|---|
 | `application_id` | HealthSherpa ID (e.g., `HSA000000001`) |
 | `policy_status` | See Policy Status Values below |
-| `document_status` | `none_needed`, `required`, `uploaded`, `verified`, `denied` |
+| `document_status` | `none_needed`, `required`, `uploaded`, `verified`, `denied`. This is the application's current API document state; `none_needed` does not promise that the carrier will never request eligibility evidence. |
 | `sep_reason` | Echoed SEP reason (may differ from input — see API Behavior Notes in SKILL.md) |
 | `policies` | Array of policy objects (populated post-submission) |
 | `payment_instructions` | Carrier payment configuration. When `payment_required_with_submission` is `true`, provide the payment method before submit (see [payment-and-documents.md](payment-and-documents.md)). |

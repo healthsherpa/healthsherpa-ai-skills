@@ -126,7 +126,8 @@
         "Handles cancelled status to stop future reimbursements",
         "Handles terminated status to reconcile retroactive changes, may require clawback",
         "Handles pending_effectuation status to record submission, does not treat as active coverage",
-        "Does not assume events arrive in order"
+        "Does not assume events arrive in order",
+        "When an older event conflicts with a newer stored state, retrieves the current application before changing status instead of applying a regression based on delivery order"
       ]
     },
     {
@@ -135,6 +136,8 @@
       "expected_output": "Code that checks both enrollment flags on the plan and routes accordingly, with proper 302 handling for deeplinks. UI shows a single 'Enroll' button, not backend flag labels.",
       "assertions": [
         "Checks api_enrollment and deeplink_enrollment flags to determine routing",
+        "Does not use a static carrier or state allowlist as the source of EnrollConnect availability",
+        "Treats the selected plan's live api_enrollment value as authoritative for the quoted ZIP, county, plan year, and plan",
         "Routes api_enrollment: true plans to POST /api/v1/applications on the ICHRA proxy base URL",
         "Routes deeplink-only plans to POST /public/ichra/off_ex on the HealthSherpa base URL (different host)",
         "Authorizes the current user for the tenant, employer, household, selected plan, and create or Deeplink action before sending PII",
@@ -389,7 +392,7 @@
         "Reads plan data from response.plan",
         "Treats special_enrollment_period.event_types as an object keyed by request enum, not an array",
         "Uses event_date_days_before as the maximum past event age and event_date_days_after as the maximum future event offset relative to today",
-        "Uses documentation_required to determine whether SEP proof is needed",
+        "Uses documentation_required to determine whether SEP proof blocks initial submission and does not treat false as proof that evidence will never be needed",
         "Uses attestation content, required flags, attestation_text, and options maps according to each returned attestation shape",
         "Processes applicants.primary and applicants.dependents requirements independently",
         "Processes communication_preferences, hra, proof_of_residency_required, and proof_of_residency_text when returned",
@@ -526,6 +529,170 @@
         "Rejects every redirect on sensitive payment-proxy requests so API keys and bank data cannot leave the pinned origin",
         "Treats response values as untrusted by parameterizing SQL, passing untrusted shell values as separate arguments without interpolation, allowlisting file-path components, and escaping HTML",
         "Does not retry deterministic 4xx responses and honors retry_after for 429 responses"
+      ]
+    },
+    {
+      "id": 27,
+      "prompt": "Build a server-side subscriber-only Avera Health Plans ICHRA enrollment flow for a South Dakota employee. Discover a current standard medical plan, fetch its requirements, create the application, submit it, and monitor it. Explain which Avera fields are required even when plan requirements omit HRA metadata, and include failure handling.",
+      "expected_output": "A secure, response-driven Avera subscriber flow that discovers current inventory, builds the complete application, handles create errors and actions, and monitors beyond asynchronous submission.",
+      "assertions": [
+        "Keeps the x-api-key in server-side secret storage, uses HTTPS, and does not log request bodies or applicant, HRA, signature, or payment data",
+        "Authorizes the current user for the tenant, employer, household, selected plan, and create action before sending PII, then binds the returned application_id to that scope",
+        "Quotes with off_ex: true and uses current returned inventory rather than hardcoding a production plan ID",
+        "Identifies Avera issuer 60536 as the PY2026 South Dakota staging issuer while explaining that state and plan-year availability must be discovered",
+        "Fails with a clear unavailable result when the quote returns no Avera medical plan with api_enrollment: true",
+        "Accepts only a medical plan with api_enrollment: true and checks deeplink_enrollment instead of assuming one path",
+        "When both enrollment flags are true, prefers EnrollConnect unless Deeplink was selected before creating an application",
+        "Fetches GET /plans/:hios_id?plan_year=2026&include=enrollment_requirements before building the application",
+        "Fails closed when enrollment_requirements is unavailable instead of inventing carrier questions or legal text",
+        "Requires either ssn or itin for every applicant age one or older and explains that Avera accepts ITIN in place of SSN",
+        "Sends uses_tobacco and race_ethnicity for the primary",
+        "Sends language_spoken and language_written for the primary",
+        "Uses a physical residential address and rejects a PO box",
+        "Uses phone_type home, work, or cell and treats marital_status as optional with current single and married options",
+        "Does not invent citizenship, state-residency, or PCP answers as Avera requirements",
+        "Sends the primary signature and signatures.signature_date in their separate locations",
+        "Always sends the complete top-level HRA and employer name, FEIN, and address even when enrollment_requirements.hra is null",
+        "Sends premium_payer, household_size, annual_household_income, and annual_household_income_determination with a documented determination value",
+        "Uses employer, employee, or tpa for premium_payer; when the payer is tpa, sends the HealthSherpa-assigned identifier at top-level tpa_slug and direct contact fields under hra without a conflicting nested slug",
+        "Uses the standard agent_of_record with NPN and does not invent a carrier producer code or broker license ID",
+        "Uses a returned Avera SEP event and recognizes that current documentation_required values are false, so initial submission does not wait for a document without claiming that eligibility evidence is never needed",
+        "Treats create 201 as a draft, stores application_id, inspects errors, and corrects the same draft instead of retrying create",
+        "Authorizes the user for the specific application and validates the returned submit action before submission",
+        "Reads payment_instructions before submission and follows a future payment-required response instead of hardcoding the current Avera payment path",
+        "Treats submit 202 as queued, treats pending_effectuation as intermediate, and continues monitoring toward effectuation or another documented boundary",
+        "Does not claim downstream 834 delivery, payment completion, or carrier effectuation from the API result"
+      ]
+    },
+    {
+      "id": 28,
+      "prompt": "Add Avera HSA-plan and payment handling to an existing secure integration. The selected Avera HSA plan returns a required Fidelity contact-consent question. The consumer chooses Opt-out. Show the application answer, submit order, payment decision, and browser redirect safety.",
+      "expected_output": "An Avera HSA flow that preserves an explicit false answer, evaluates payment instructions before submission, and handles the current post-submit redirect or phone path safely.",
+      "assertions": [
+        "Quotes current Avera inventory and selects an HSA-eligible medical plan with api_enrollment: true",
+        "Fetches enrollment_requirements and displays the exact returned Fidelity consent content and option labels",
+        "Sends communication_preferences.agrees_hsa_contact_opt_in: false as a boolean",
+        "Treats false as a valid required Opt-out and does not block health plan enrollment",
+        "Rejects omission, null, strings, and numbers for the currently required HSA answer",
+        "Reads payment_instructions from create or a fresh GET before submit",
+        "When payment_required_with_submission is false, validates and calls the submit action before requesting payment redirect",
+        "If a future response requires payment before submit, follows its validated payment action instead of the current Avera example",
+        "Treats submit 202 and pending_effectuation as intermediate rather than payment or carrier confirmation",
+        "After submit, offers pay by phone only when advertised and requests payment redirect only when advertised",
+        "Requires an HTTPS POST redirect on an exact allowed origin and HTML-escapes opaque fields without logging SAML or payment values",
+        "Authorizes the current user for the specific application and payment action before retrieving redirect data"
+      ]
+    },
+    {
+      "id": 29,
+      "prompt": "Build Avera dependent handling for seven test households: a spouse, an adult domestic partner, a child age 25, child dependents at the non-student age-26, full-time-student age-28, and full-time-student age-29 boundaries, and a disabled adult dependent. Also show the child-only responsible-party branch.",
+      "expected_output": "Avera dependent payloads and preflight rules that follow current relationships, identity, disability, QMSCO, signatures, age exceptions, and responsible-party conditions.",
+      "assertions": [
+        "Uses only returned dependent relationships; current Avera values are spouse, domestic_partner, and child",
+        "Requires either ssn or itin for every dependent age one or older",
+        "Sends uses_tobacco, race_ethnicity, and has_disability for every dependent",
+        "Also sends has_qualified_medical_child_support_order for each child",
+        "Follows returned signature metadata: the current adult domestic partner signs and the spouse does not",
+        "Accepts a non-disabled child through age 25 without a student exception",
+        "Rejects a non-disabled non-student child age 26",
+        "Sends full_time_student: true for a non-disabled student age 26 through 28 and does not require graduation_date",
+        "Accepts the age-28 student boundary and rejects a non-disabled age-29 student",
+        "Does not apply the student ceiling to a disabled-dependent branch without following the current carrier errors",
+        "For child-only coverage, renders the returned responsible-party question and conditions",
+        "Uses only parent_guardian or sibling for the current responsible-party relationship",
+        "Keeps HRA employer data out of responsible_party",
+        "Uses separate applications or payloads for boundary failures instead of submitting known-ineligible applicants"
+      ]
+    },
+    {
+      "id": 30,
+      "prompt": "Implement Avera special-enrollment and document handling for an offered-ICHRA event. Current plan requirements say documentation_required is false, but Avera allows an optional SEP document after submission. Show event validation, submission, the optional upload window, and failure handling.",
+      "expected_output": "A response-driven Avera SEP flow that does not block initial submission, exposes optional post-submit upload for the documented window, and avoids downstream claims.",
+      "assertions": [
+        "Uses a key returned by special_enrollment_period.event_types instead of a hardcoded carrier-native value",
+        "Authorizes the current user for the specific application, submit action, and supporting-documentation action before each application-scoped call",
+        "Applies event_date_days_before and event_date_days_after relative to today",
+        "When documentation_required is false, does not block initial submit or fabricate a supporting_documentation_required error",
+        "Explains that false means not required before initial submission, not that SEP evidence will never be requested",
+        "Displays returned documentation guidance and optional-upload notice when present",
+        "Submits only after create errors are otherwise empty and the validated submit action is present",
+        "Treats submit 202 and pending_effectuation as intermediate",
+        "After submission, offers upload only when the current application returns the supporting-documentation action",
+        "Anchors Avera's optional window at 30 days after application submission",
+        "Uploads with document_type: sep and keeps the API key and document in server-side handling",
+        "Stops and explains the current state when the action is absent or the window is closed instead of retrying blindly",
+        "Does not claim that optional upload proves document verification, carrier acceptance, or 834 delivery"
+      ]
+    },
+    {
+      "id": 31,
+      "prompt": "Implement Avera post-submit maintenance for an address correction, adding and removing a dependent, cancellation before effectuation, and termination after effectuation. Start from a fresh application GET and make every action authorization- and response-driven.",
+      "expected_output": "A secure Avera maintenance flow that uses full PUT payloads, preserves member identity, validates current capabilities and actions, and calls cancel or terminate only in the correct state.",
+      "assertions": [
+        "GETs the current application and authorizes the platform user for that application and requested action",
+        "Requires supports_changes, can_report_change, and a validated update action before address or dependent PUT",
+        "Sends the full application payload on PUT and preserves every retained applicant member_id",
+        "Adds a new dependent without member_id and removes a dependent by omitting that person from the complete dependent array",
+        "Preserves Avera-required identity, race, tobacco, disability, child QMSCO, language, signature, HRA, and SEP fields in the full PUT",
+        "Uses the submit action returned after a maintenance update and does not submit concurrently",
+        "Requires the returned cancel action and a pre-effectuation state before cancellation",
+        "Requires the returned terminate action and an effectuated policy before termination",
+        "Stops without mutation when a required capability or action is absent or invalid",
+        "Does not automatically switch to Deeplink or create a replacement application after an ambiguous mutation",
+        "Continues monitoring intermediate statuses and does not treat pending_effectuation as final carrier acceptance",
+        "Does not log full application bodies or sensitive applicant fields"
+      ]
+    },
+    {
+      "id": 32,
+      "prompt": "A selected EnrollConnect plan returns documentation_required: false for offered_ichra. The partner says this proves the consumer will never need SEP documents. Explain the correct behavior and implement the form, submission, optional upload, and monitoring flow.",
+      "expected_output": "A requirements-driven SEP flow that distinguishes pre-submission requiredness from the carrier's later eligibility-evidence process.",
+      "assertions": [
+        "Explains that documentation_required answers whether a file blocks initial submission, not whether eligibility evidence will ever be needed",
+        "Allows initial submit without a file when documentation_required is false and other errors are empty",
+        "Does not display a permanent 'no documents required' message",
+        "Encourages the applicant to upload evidence when it is available",
+        "Displays special_enrollment_period.documentation.guidance and optional_upload_notice when returned",
+        "Uses post_enrollment_upload_days when returned to communicate the post-submit upload window",
+        "Offers upload only when the current application returns upload_supporting_documentation",
+        "Uploads SEP evidence with document_type: sep",
+        "Monitors document_status for required, uploaded, verified, or denied changes",
+        "Uses sep_docs_* policy statuses only for a carrier that returns SEP suspension statuses",
+        "Explains that the carrier may request or review evidence after submission"
+      ]
+    },
+    {
+      "id": 33,
+      "prompt": "Build the Statement of Accountability portion of an EnrollConnect application for an Ambetter California or Anthem Nevada primary applicant. The applicant answers No to reading or writing English and No to completing the application without assistance. A translator helped because the applicant does not read English.",
+      "expected_output": "A primary-applicant payload that correctly inverts both consumer answers, uses strict booleans, and includes the conditional translator information.",
+      "assertions": [
+        "Applies the guidance to Ambetter California, Anthem California, Colorado, or Nevada, and Quartz Wisconsin or Minnesota",
+        "Sends applicants.primary.not_fluent_in_english: true for the No answer",
+        "Sends applicants.primary.assistance_required: true for the No answer",
+        "Uses JSON booleans rather than string values",
+        "Places both fields under applicants.primary only",
+        "Includes applicants.primary.translator because at least one answer is true",
+        "Includes translator first_name, last_name, and reason",
+        "Uses does_not_read_english as the translator reason",
+        "Explains that translator is not required when both booleans are false",
+        "Does not discuss unsupported carrier-state combinations or internal rollout details"
+      ]
+    },
+    {
+      "id": 34,
+      "prompt": "Compare the EnrollConnect application requirements for current plans from CoxHealth, Group Health Cooperative, Jefferson Health Plans, and Quartz. Show the carrier-specific fields a form builder must handle without hardcoding plan availability.",
+      "expected_output": "A response-driven comparison that identifies the documented carrier deltas while requiring current quote and plan metadata.",
+      "assertions": [
+        "Quotes current inventory and requires api_enrollment: true instead of using a static carrier-state allowlist",
+        "For CoxHealth, includes SSN, primary marital status, dependent tobacco and race, the returned spouse and child relationships, and the complete HRA affordability and TPA fields",
+        "For CoxHealth, explains that documentation_required false does not block initial submission and does not mean evidence will never be requested",
+        "For Group Health Cooperative, includes SSN, race, phone type, language, returned relationships, returned adult signatures, dependent HRA offer handling, required SEP proof, and the conditional HSA answer",
+        "For Jefferson Health Plans, uses the full returned relationship list rather than a generic subset",
+        "For Jefferson Health Plans, includes SSN, race, dependent tobacco, child medical-support-order handling, child-only responsible party, explicit HRA offer, signatures, and required SEP proof",
+        "For Quartz, includes SSN, race, age-21 tobacco logic, spoken and written language differences, returned relationships, minor responsible party, and required SEP proof",
+        "For Quartz Wisconsin and Minnesota, includes the Statement of Accountability and conditional translator fields",
+        "Does not infer an HSA question from hsa_eligible for Quartz",
+        "Reads payment instructions and lifecycle actions from each application response instead of carrier-name assumptions"
       ]
     }
   ]
