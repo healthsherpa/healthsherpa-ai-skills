@@ -3,7 +3,7 @@ name: ichra-platform-integration
 description: Build ICHRA platforms that integrate with HealthSherpa APIs for plan quoting, enrollment, payment, and policy management. Use when building or debugging an ICHRA platform integration, working with HealthSherpa enrollment or quoting APIs, or when the user mentions ICHRA, HRA, enrollment, quoting, plan selection, carrier submission, or policy status.
 metadata:
   author: healthsherpa
-  version: "1.1"
+  version: "1.3"
 ---
 
 # ICHRA Platform Integration with HealthSherpa
@@ -44,9 +44,11 @@ Keep API keys, Basic Auth credentials, webhook credentials, and trusted proxy or
 - Treat all response fields as untrusted at their destination. Parameterize SQL, avoid shell interpolation by passing values as separate arguments, allowlist file-path components, and escape values before rendering HTML.
 - NEVER log full request or response bodies. Applicant fields including `ssn`, `itin`, `date_of_birth`, `signature`, `email`, full `residential_address`, and `hra.employer.fein` must be redacted from logs and error reports.
 - ALWAYS authenticate webhook requests using the method configured during onboarding. Reject requests that fail authentication before any business logic runs.
+- Make webhook processing idempotent and do not assume events arrive in order. Deduplicate by `transaction_id`. When an older event conflicts with a newer stored state, retrieve the current application before changing status instead of applying a regression based on delivery order.
 - ALWAYS use `application_id` (not `id`) as the application identifier in responses.
 - ALWAYS use HealthSherpa-assigned applicant `member_id` for matching on PUT. `external_id` is optional metadata.
 - ALWAYS check `api_enrollment` / `deeplink_enrollment` flags on each plan before routing to enroll.
+- NEVER infer EnrollConnect availability from a static carrier or state list. The selected plan's current `api_enrollment` value is authoritative for that ZIP, county, state, and plan year.
 - ALWAYS read `payment_instructions` from the application response. NEVER hardcode carrier payment behavior.
 - When `payment_instructions.payment_required_with_submission` is `true`, require a `next_actions` entry with `rel: "payment_method"`. Require `method: "PUT"` and an `href` equal to `/api/v1/applications/{application_id}/payment_method` for the current application. Reject absolute URLs, unexpected methods, and application ID mismatches. Call the validated action before `/submit` and require a successful response. If the action is absent or invalid, stop and contact HealthSherpa.
 - Send `PUT /api/v1/applications/:id/payment_method` through the PCI-compliant proxy URL provided by HealthSherpa. NEVER log or expose `eft_routing` or `eft_number`.
@@ -63,14 +65,16 @@ Keep API keys, Basic Auth credentials, webhook credentials, and trusted proxy or
 - ALWAYS include top-level `hra` with employer `name`, `fein`, and `address` on every ICHRA enrollment. When `enrollment_requirements.hra.per_applicant_hra` is true, also collect and send `hra` under the primary and every non-child dependent relationship supported by the selected carrier, using the returned allowed values. Do not collect per-applicant HRA answers from children. Send the household follow-up at top-level `qsehra_both_employers_claim_reimbursement` when its returned condition applies.
 - NEVER require `external_id`. It is optional everywhere.
 - NEVER assume real-time payment confirmation. Most carriers report asynchronously via feeds.
-- ALWAYS fetch `enrollment_requirements` via `GET /plans/:hios_id?plan_year=YYYY&include=enrollment_requirements`. Process returned `attestations`, `special_enrollment_period.event_types`, applicant questions, communication preferences, HRA requirements, and proof-of-residency instructions. Use the returned questions, content, labels, options, date windows, and conditional requiredness. Omitted keys do not apply to the selected plan.
+- ALWAYS fetch `enrollment_requirements` via `GET /plans/:hios_id?plan_year=YYYY&include=enrollment_requirements`. Process returned `attestations`, `special_enrollment_period.event_types`, applicant questions, communication preferences, HRA requirements, and proof-of-residency instructions. Use the returned questions, content, labels, options, date windows, and conditional requiredness. An omitted key means that dynamic plan requirement does not apply; it does not remove baseline fields or a documented carrier validation such as Avera's top-level HRA.
 - When `communication_preferences.email_contact_consent.required` is true, show the returned carrier content and collect an explicit Yes or No. Send the boolean at `communication_preferences.email_contact_consent`; both `true` and `false` satisfy requiredness.
 - When `communication_preferences.agrees_hsa_contact_opt_in` is an object, show its returned carrier-defined `content` and option labels. If `required` is true, require an explicit `true` or `false`; omission or null is a blocking error. If `required` is false, the answer is optional. Send any answer at `communication_preferences.agrees_hsa_contact_opt_in`. A false answer satisfies requiredness and does not block enrollment in the health plan. If the requirement or its parent is absent or null, do not show or send the field. Reject non-boolean answers.
+- Do not infer the HSA question from `hsa_eligible`. It applies only when `plan.enrollment_requirements.communication_preferences.agrees_hsa_contact_opt_in` is returned. A required unanswered field causes a blocking `missing_required_field`, so collect it before submit and preserve an explicit `false`.
+- Interpret SEP `documentation_required` as **required before initial submission**. When it is `true`, block submit until SEP proof is uploaded. When it is `false`, submission may proceed without an upload, but the value does not answer whether the carrier may request evidence later. Do not display "no documents required." Encourage upload when evidence is available and follow returned guidance, actions, deadlines, and document status.
 - When the plan returns Wellpoint Texas communication-impairment requirements, collect `applicants.primary.has_communication_impairment`. A `true` answer requires `communication_impairment_format`; `other` also requires `communication_impairment_format_other`. A `false` answer must remain an explicit No.
 - Interpret each SEP reason's `event_date_days_before` and `event_date_days_after` relative to today. They define how far the qualifying-event date may be in the past or future; they are not enrollment windows measured from the event.
 - ALWAYS include `agent_of_record` with at minimum `first_name`, `last_name`, and `national_producer_number` on every enrollment. Without it, the enrollment may not be attributed to the correct agent or broker.
 - ALWAYS include `off_ex: true` in quoting requests. The API only supports off-exchange enrollment. Without it, the API returns on-exchange plans which are not supported.
-- All enums are snake_case lowercase. Dates in API requests and responses are ISO 8601; dates in webhook payloads are `MM/DD/YYYY` (see webhooks-and-monitoring.md). Money as string (`"50.50"`).
+- Send request enums as lowercase snake_case. Normalize response values before comparison because some responses use display casing. Dates in API requests and responses are ISO 8601; dates in webhook payloads are `MM/DD/YYYY` (see webhooks-and-monitoring.md). Treat premium fields in responses and HRA amount and income fields in requests as JSON numbers.
 
 ## API Behavior Notes
 
@@ -184,7 +188,7 @@ currently SEP-suspended application. For other document workflows, use
 
 The API expects the full application shape on create. Build the complete payload before calling `POST /applications`. A structurally invalid request can return `422`; a `201` means the draft exists but can still include blocking errors and is not ready to submit until they are resolved.
 
-Required fields vary by carrier. Some carriers require SSN, race/ethnicity, hispanic origin, language, and other fields that are optional for others. The safest approach is to always send the full set below.
+Required fields vary by carrier. Some carriers require SSN, race/ethnicity, hispanic origin, language, and other fields that are optional or hidden for others. Start from the full shape below, then follow the selected plan metadata and carrier section. Do not send a hidden carrier field merely because another carrier requires it.
 
 **Always required (all carriers):**
 
@@ -242,9 +246,12 @@ There is no way to query valid effective dates ahead of time. Omit this field un
 5. `POST /applications` — create with complete payload (see Minimum Viable Payload above)
 6. Check the `errors` array and route each prerequisite:
    - If it contains `supporting_documentation_required`, upload docs in step 7.
+   - If it contains `missing_required_field` for `communication_preferences.agrees_hsa_contact_opt_in`, collect the selected plan's returned HSA answer. Preserve `false` as a valid answer.
    - If it contains `missing_required_field` for `payment_method` and `payment_required_with_submission` is `true`, resolve payment in step 8.
    - For other errors, stop and correct the application before submit.
-7. `POST /applications/:id/supporting_documentation` with the applicable `document_type` and file payload (if needed)
+7. Handle SEP evidence:
+   - If the selected event returns `documentation_required: true`, upload `document_type: "sep"` before submit.
+   - If it returns `false`, do not block submit, but offer upload when the applicant has evidence and the supporting-documentation action is available. Display `special_enrollment_period.documentation.guidance` and `optional_upload_notice` when returned.
 8. Read `payment_instructions` from the application response to determine payment timing:
    - If `payment_required_with_submission` is `true`, require and validate the `payment_method` action in `next_actions`. Its method must be `PUT`, and its relative `href` must match the current application. Send the validated action through the HealthSherpa-provided PCI proxy. Continue only after a `200` response. If the action is absent or invalid, stop and contact HealthSherpa.
    - Otherwise, proceed to submit first (step 9).
@@ -278,11 +285,11 @@ Response includes `enrollment_requirements.attestations` with keys like:
 - `broker_signature_attestation` — broker/agent consent
 - `pediatric_dental` — pediatric dental attestation with `attestation_text`, `required`, and an `options` map
 - `tx_hmo_consumer_choice_disclosure` — Texas HMO disclosure content and optional acceptance-checkbox label
-- `state_supplement_primary_signature` — state-specific addendum (CO, UT, NJ)
-- `state_supplement_spouse_signature` — spouse state addendum (UT)
+- `state_supplement_primary_signature` — Colorado state supplement when returned
+- `state_supplement_spouse_signature` — spouse state supplement when returned for an application with a spouse
 - `state_supplement_disclosures_signature` — state disclosure (CO)
 
-Keys that are absent or null are not required for that carrier/state. A present key can still contain `required: false`; follow the returned requiredness instead of relying on key presence alone.
+Keys that are absent or null are not dynamic plan requirements for that carrier and state. A present key can still contain `required: false`; follow the returned requiredness instead of relying on key presence alone. Baseline application fields and documented carrier validations still apply.
 
 **Implementation pattern:**
 1. Fetch enrollment_requirements when user selects a plan (step 3 of Happy Path)
@@ -290,8 +297,20 @@ Keys that are absent or null are not required for that carrier/state. A present 
 3. When `pediatric_dental.required` is true, display `attestation_text`, render the `{value: label}` options as radio/select choices, and submit the selected key
 4. Display a returned Texas HMO disclosure. When its `content_data.disclosure_statement_checkbox_label` is present, render that checkbox and submit `attestations.disclosure_statement_accepted: true`
 5. Replace `%{signature_name}` placeholder with the applicant's full legal name
-6. Submit only fields required by the returned metadata
+6. Submit the baseline application fields, documented carrier fields, and dynamic fields required by the returned metadata
 7. If enrollment_requirements is unavailable, stop and retry or contact HealthSherpa; do not invent carrier legal text
+
+## Statement of Accountability
+
+Ambetter California, Anthem California, Colorado, and Nevada, and Quartz Wisconsin and Minnesota collect a Statement of Accountability for the primary applicant.
+
+- Ask whether the primary applicant reads or writes English. Send `applicants.primary.not_fluent_in_english: true` when the answer is No and `false` when the answer is Yes.
+- Ask whether the primary applicant completed the application without assistance. Send `applicants.primary.assistance_required: true` when the answer is No and `false` when the answer is Yes.
+- Send real JSON booleans. The strings `"true"` and `"false"` are invalid.
+- When either field is `true`, send `applicants.primary.translator` with `first_name`, `last_name`, and `reason`. Current reason values are `does_not_read_english`, `does_not_speak_english`, `does_not_write_english`, and `other`.
+- `signatures.translator_signature_date` is available when a translator signs.
+
+These fields apply to the primary applicant only.
 
 ## Signatures (Common Mistake)
 
@@ -309,6 +328,21 @@ HCSC medical applications in IL, MT, NM, OK, and TX must include exactly one of 
 ## Document Upload
 
 Include `document_type` at the top level alongside the file. The API rejects uploads without it. Use `"sep"` for SEP documentation or `"proof_of_residency"` when the selected plan requires residency proof.
+
+For SEP eligibility, `documentation_required` answers one narrow question: must a file be present before initial submission?
+
+| Returned value | Integration behavior |
+|---|---|
+| `true` | Require at least one SEP document before submit. Create or GET normally returns `supporting_documentation_required` until upload succeeds. |
+| `false` | Do not block initial submit on a missing file. Do not tell the applicant that documents are never needed. Encourage upload when evidence is available and follow later carrier requests or document review. |
+
+Also read `special_enrollment_period.documentation`:
+
+- `guidance`: display the carrier's general evidence instructions.
+- `optional_upload_notice`: display the carrier's explanation when upload is optional during enrollment.
+- `post_enrollment_upload_days`: when present, communicate the returned post-submission upload window.
+
+After create and submission, use a fresh application response. Offer upload only when `next_actions` includes `upload_supporting_documentation`. Monitor `document_status` for later `required`, `uploaded`, `verified`, or `denied` transitions. Use `sep_docs_*` policy statuses only when the carrier uses SEP suspension. A `false` pre-submission requirement does not guarantee that the carrier will never request proof.
 
 **JSON upload:**
 ```json
@@ -414,11 +448,38 @@ Never retry create or switch to Deeplink automatically after a timeout or ambigu
 
 ## Carrier-Specific Behavior
 
+Do not maintain a static EnrollConnect carrier matrix in application code or integration guidance. Quote the member's current ZIP and county, then use the selected plan's `api_enrollment` and `deeplink_enrollment` values. Availability can vary by county, plan year, and plan.
+
+See [carrier-examples.md](references/carrier-examples.md) for current carrier-specific guidance, including CoxHealth, Group Health Cooperative, Jefferson Health Plans, and Quartz.
+
 - Some carriers reject specific SEP reasons — the API returns a 422 with a descriptive error
 - Some carriers do not support cancellations — `cancel` will not appear in `next_actions`
 - Carrier-specific fields may cause 422 on create if missing
+- A missing required HSA contact answer returns `missing_required_field` at `communication_preferences.agrees_hsa_contact_opt_in`. Collect an explicit boolean; `false` is complete.
 
 Always check the `errors` array on create and the `next_actions` on GET to understand what's available.
+
+### Avera Health Plans
+
+Quote current inventory instead of hardcoding a plan. PY2026 staging validation used Avera issuer `60536` in South Dakota. Both tested medical plans returned `api_enrollment: true` and `deeplink_enrollment: true`; prefer EnrollConnect unless Deeplink is selected before creating an application. State and plan-year inventory changes, so do not assume Avera is available from a carrier or state list alone.
+
+- Every applicant age one or older needs either `ssn` or `itin`. Avera accepts an ITIN in place of an SSN.
+- Send `uses_tobacco` and `race_ethnicity` for every applicant. Send `language_spoken` and `language_written` for the primary. Avera does not collect citizenship, state-residency, or primary-care-provider answers.
+- Avera requires a physical residential address and does not accept a PO box. `phone_type` accepts `home`, `work`, or `cell`. `marital_status` is optional and currently accepts `single` or `married`.
+- Use the returned dependent relationships. Current values are `spouse`, `domestic_partner`, and `child`. Send `has_disability` for every dependent. For a child, also send `has_qualified_medical_child_support_order`.
+- A non-disabled child dependent can enroll through age 25 without a student exception. A non-disabled full-time student can enroll through age 28. Send `full_time_student: true` for the exception; Avera does not require `graduation_date`. A non-disabled non-student age 26 or older and a non-disabled student age 29 or older are rejected. For a disabled dependent, follow current plan and application errors instead of applying the student ceiling.
+- Follow returned signature metadata. The primary signature and application signature date are required. Current plan requirements identify an adult domestic partner, but not a spouse, as needing a dependent signature.
+- For a child-only application, render the returned responsible-party question. When another person is responsible for payment, use the returned `parent_guardian` or `sibling` relationship and keep employer HRA data out of `responsible_party`.
+- Always include the complete top-level HRA. Send `offered_hra`, `type`, `amount`, `contribution_covers`, `start`, employer `name`, `fein`, and `address`, plus `premium_payer`, `household_size`, `annual_household_income`, and `annual_household_income_determination`. `premium_payer` accepts `employer`, `employee`, or `tpa`; the determination accepts `w2_wages`, `rate_of_pay_hourly`, or `fpl`. When the payer is `tpa`, send the HealthSherpa-assigned TPA identifier at application top-level `tpa_slug`; direct TPA contact values use `hra.tpa_name`, `hra.tpa_phone_number`, `hra.tpa_street_address`, `hra.tpa_street_address_unit_number`, `hra.tpa_city`, `hra.tpa_state`, `hra.tpa_zip_code`, and `hra.tpa_county`. Do not send a conflicting nested `hra.tpa_slug`. Current Avera plan requirements return `hra: null`; that omission does not remove these baseline and carrier fields.
+- Avera's returned SEP reasons currently have `documentation_required: false`. This means initial submission does not wait for proof, not that evidence is never needed. Encourage the applicant to upload available proof, display the returned optional-upload notice, and use the supporting-documentation action during the returned 30-day post-submission window.
+- When an Avera plan returns the Fidelity contact-consent requirement, render its content and send the explicit boolean at `communication_preferences.agrees_hsa_contact_opt_in`. Both Opt-in and Opt-out satisfy the required question.
+- Read `payment_instructions` from create or a fresh GET before submission. Current Avera responses set `payment_required_with_submission: false`, so submit first and then offer the returned HTTPS POST payment redirect or pay-by-phone option. If a future response requires payment before submission, follow its validated payment action instead of the current example.
+- Use the standard `agent_of_record` with the agent's NPN. Avera does not require a carrier producer code or broker license ID.
+- Avera supports post-submit changes, cancellation before effectuation, and termination after effectuation. Use only the capabilities and actions returned for the current application.
+
+Staging validation on September 17, 2026 created and submitted standard and HSA applications without blocking errors. Both reached `pending_effectuation`; the HSA Opt-out answer persisted as `false`. Continue monitoring beyond that intermediate state. A broader September 15 run passed 27 applicable scenarios with no failures. These results establish the API behavior, not carrier effectuation or downstream 834 delivery.
+
+See [carrier-examples.md](references/carrier-examples.md) for the complete Avera request, validated boundaries, and dated staging results.
 
 ### BCBS Michigan Individual Medical
 
